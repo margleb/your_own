@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude Code local settings (machine-specific paths & permissions)
+.claude/settings.local.json
+
+# Third-party reference material — not ours to redistribute
+anthropic-skill-guide.pdf
+
+# Generated HTML explanations (normally written to the project-root tmp/)
+*-explanation-*.html

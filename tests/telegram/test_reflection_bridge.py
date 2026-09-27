@@ -149,6 +149,13 @@ class TestExecutingIt:
         assert await send_to_chat(account_id=ACCOUNT, text="привет") is False
 
 
+def _row_now(text, message_id, *, minutes_ago, sender="Чарли"):
+    """A row placed against the real clock — "how long ago" is measured from now."""
+    row = _row(text, message_id, sender=sender)
+    row.created_at = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return row
+
+
 def _row(text, message_id, *, is_self=False, is_owner=False, sender="Чарли", minutes_ago=0):
     return ChannelMessage(
         id=uuid.uuid4(), account_id=ACCOUNT, channel="telegram", chat_id=ROOM,
@@ -279,6 +286,52 @@ class TestWhatHeWakesUpKnowing:
         assert f"[SEARCH_CHAT: {first}]" in block and "До этого" in block
         assert until == wired.rows[-1].created_at
 
+    @pytest.mark.asyncio
+    async def test_a_room_still_talking_says_so(self, wired):
+        """A waking fires on the private chat's clock and knows nothing of the
+        group's. On 26.09 at 00:35 one dropped a standalone line into the room
+        in the same second the responder posted two replies — three messages
+        from him at once, one of them answering nobody."""
+        from infrastructure import settings_store
+        from infrastructure.autonomy import reflection_engine as engine
+
+        settings_store.save_settings({"telegram_chat_id": ROOM})
+        wired.rows = [_row_now("только что", 1, minutes_ago=2)]
+
+        block, _ = await engine._build_group_chat_block(None, ACCOUNT, "ru")
+
+        assert "Последняя реплика 2 мин назад — разговор идёт прямо сейчас." in block
+
+    @pytest.mark.asyncio
+    async def test_a_room_that_has_gone_quiet_says_how_long_ago(self, wired):
+        from infrastructure import settings_store
+        from infrastructure.autonomy import reflection_engine as engine
+
+        settings_store.save_settings({"telegram_chat_id": ROOM})
+        wired.rows = [_row_now("час назад", 1, minutes_ago=75)]
+
+        block, _ = await engine._build_group_chat_block(None, ACCOUNT, "ru")
+
+        assert "Последняя реплика 1 ч назад." in block
+        assert "прямо сейчас" not in block
+
+    @pytest.mark.asyncio
+    async def test_live_is_the_same_window_the_responder_uses(self, wired):
+        """One definition of "the room is talking", not two."""
+        from infrastructure import settings_store
+        from infrastructure.autonomy import reflection_engine as engine
+        from infrastructure.telegram.responder import CONVERSATION_WINDOW_MINUTES
+
+        settings_store.save_settings({"telegram_chat_id": ROOM})
+        wired.rows = [_row_now("на границе", 1, minutes_ago=CONVERSATION_WINDOW_MINUTES + 1)]
+
+        block, _ = await engine._build_group_chat_block(None, ACCOUNT, "ru")
+        assert "прямо сейчас" not in block
+
+        wired.rows = [_row_now("внутри окна", 2, minutes_ago=CONVERSATION_WINDOW_MINUTES - 1)]
+        block, _ = await engine._build_group_chat_block(None, ACCOUNT, "ru")
+        assert "прямо сейчас" in block
+
     def test_the_cap_is_a_tenth_of_a_waking_not_half_of_it(self):
         from infrastructure.autonomy import reflection_engine as engine
 
@@ -300,7 +353,8 @@ class TestWhatHeWakesUpKnowing:
         block, until = await engine._build_group_chat_block(None, ACCOUNT, "ru")
 
         assert "вчерашнее" not in block and "моя реплика" not in block, "a quiet room is not reread"
-        assert f"Тихо с {format_local(wired.rows[1].created_at)} — последним писал Чарли." in block
+        assert f"последним писал Чарли в {format_local(wired.rows[1].created_at)}." in block
+        assert "Тихо " in block, "how long it has been quiet, in words"
         assert f"Ты последний раз писал туда {format_local(wired.rows[0].created_at)}." in block
         assert until is None
 

@@ -390,6 +390,8 @@ The soul (`data/soul.md`) **is** injected into every chat as the base system pro
 | `infrastructure/autonomy/context.py` | The registry: which state block each consumer sees, and why |
 | `infrastructure/autonomy/commands.py` | The command vocabulary, and the one place a command happens |
 | `infrastructure/autonomy/threads.py` | The open-threads board |
+| `infrastructure/llm/budgets.py` | Completion-token budgets, per job × per model |
+| `infrastructure/autonomy/live_reply.py` | "a reply to her is streaming" — what a scheduled push waits for |
 | `infrastructure/autonomy/vitals.py` | The instrument panel: wakings, uptime, key, memory model, disk, spend |
 | `infrastructure/clock.py` | One timezone. Stored = UTC instant, shown = his local time |
 | `infrastructure/language.py` | One rule for what language to answer in |

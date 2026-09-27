@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
+from infrastructure.autonomy import live_reply
 from infrastructure.autonomy.helpers import get_ai_name, save_push_message
 from infrastructure.autonomy.push_validator import ValidatorAction, validate_scheduled_push
 from infrastructure.database.engine import get_db_session
@@ -79,7 +80,15 @@ async def run_due(account_id: str) -> None:
                 task.id, source, message[:80],
             )
 
-            # Phase 2: LLM validation — may rewrite or cancel before delivery
+            # Phase 2: LLM validation — may rewrite or cancel before delivery.
+            #
+            # First let any reply that is still streaming to her land. The
+            # validator decides against the dialogue, and a dialogue missing
+            # the exchange being written right now is the wrong thing to decide
+            # against: it would wave through a question she is in the middle of
+            # answering.
+            await live_reply.wait_until_quiet(account_id)
+
             api_key = settings.get("openrouter_api_key", "")
             if api_key:
                 try:

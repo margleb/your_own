@@ -26,13 +26,21 @@ _PROMPTS_DIR = "infrastructure/memory/prompts"
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 async def _complete(api_key: str, system: str, user: str) -> str:
+    """One short verdict, with room for the model to think in front of it.
+
+    The budget was a flat 650, which on a reasoning model is less than the
+    thinking alone: 21 of these were truncated in the week of 21–27.09, and
+    each one became "could not parse AI response" — a dedup decision lost.
+    """
+    from infrastructure.llm import budgets
+
     client = make_llm_client(api_key)
     return await client.complete(
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        max_tokens=650,
+        max_tokens=budgets.for_job(budgets.Job.VERDICT),
         temperature=0.7,
     )
 

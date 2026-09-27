@@ -20,6 +20,7 @@ from typing import Any, Awaitable, Callable
 from infrastructure.agents.research import Citation, ProbeResult, ResearchContext, Source
 
 from infrastructure.clock import format_local, local_to_utc
+from infrastructure.llm import budgets
 from infrastructure.paths import PROJECT_ROOT
 logger = logging.getLogger("agents.sources")
 
@@ -77,7 +78,7 @@ async def probe_web(query: str, ctx: ResearchContext) -> ProbeResult:
     text, raw_citations = await client.complete_with_tools(
         messages=messages,
         tools=_web_tools(ctx.web_engine),
-        max_tokens=1200,
+        max_tokens=budgets.for_job(budgets.Job.WEB_ANSWER, ctx.model),
     )
 
     if not text:
@@ -336,7 +337,6 @@ DOCS_MAX_CHARS = 120_000
 # The whole corpus goes in as input, so the model reasons a lot before it
 # writes — and that reasoning is billed against max_tokens. Measured: at 2000
 # the answer came back after 260 characters.
-DOCS_MAX_TOKENS = 8000
 
 
 def _doc_updated(path: Path) -> str:
@@ -396,7 +396,7 @@ async def probe_docs(query: str, ctx: ResearchContext) -> ProbeResult:
             {"role": "system", "content": ctx.prompt("docs_system")},
             {"role": "user", "content": ctx.prompt("docs_user", task=query, docs=corpus)},
         ],
-        max_tokens=DOCS_MAX_TOKENS,
+        max_tokens=budgets.for_job(budgets.Job.DOC_ANSWER, ctx.model),
         temperature=0.2,
         return_meta=True,
     )

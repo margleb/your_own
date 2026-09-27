@@ -189,13 +189,24 @@ def _set_last_reflection_ts(account_id: str) -> None:
 # but the budget has to cover the reasoning in front of it — at 2200 the whole
 # allowance went to thinking and the reply came back empty. Anthropic's own
 # guidance for a non-streaming request is ~16000.
-STEP_MAX_TOKENS = 16000
+def step_max_tokens() -> int:
+    """The budget for one step, for the model that is about to run it.
+
+    A function rather than a constant: the model lives in settings and can
+    change without a restart, and the room a step needs is the model's, not
+    this module's. See infrastructure/llm/budgets.py.
+    """
+    from infrastructure.llm import budgets
+
+    return budgets.for_job(budgets.Job.STEP)
 
 
 async def _complete(
-    api_key: str, messages: list[dict], max_tokens: int = STEP_MAX_TOKENS
+    api_key: str, messages: list[dict], max_tokens: int | None = None
 ) -> tuple[str, bool]:
     """Return ``(text, truncated)`` for one reflection step."""
+    if max_tokens is None:
+        max_tokens = step_max_tokens()
     client = make_llm_client(api_key)
     text, finish_reason = await client.complete(
         messages, max_tokens=max_tokens, temperature=0.7, return_meta=True
@@ -774,12 +785,13 @@ async def _build_group_chat_block(
             mine = await repo.last_self(account_id, chat_id)
             who = responder._who(last[-1], ai_name, lang)
             when = format_local(last[-1].created_at)
+            ago = _span_words((now_utc() - last[-1].created_at).total_seconds(), lang)
             if ru:
-                line = f"{room} Тихо с {when} — последним писал {who}."
+                line = f"{room} Тихо {ago} — последним писал {who} в {when}."
                 line += (f" Ты последний раз писал туда {format_local(mine.created_at)}."
                          if mine else " Ты там ещё не писал.")
             else:
-                line = f"{room} Quiet since {when} — {who} spoke last."
+                line = f"{room} Quiet for {ago} — {who} spoke last, at {when}."
                 line += (f" You last wrote there {format_local(mine.created_at)}."
                          if mine else " You have not written there yet.")
         return f"<group_chat>\n{line}\n</group_chat>\n", None
@@ -791,10 +803,29 @@ async def _build_group_chat_block(
     hers = sum(1 for r in fresh if r.is_owner)
     span = _span_words((fresh[-1].created_at - fresh[0].created_at).total_seconds(), lang)
     first = format_local(fresh[0].created_at)
+
+    # Whether the room is still talking, and not only what it said. A waking
+    # fires on the private chat's clock and knows nothing of the group's, so on
+    # 26.09 at 00:35 a waking dropped a standalone line into the room in the
+    # same second the responder posted two replies — three messages from him at
+    # once, one of them answering nobody. He cannot weigh that without being
+    # told the conversation is live.
+    from infrastructure.telegram.responder import CONVERSATION_WINDOW_MINUTES
+
+    idle_s = (now_utc() - fresh[-1].created_at).total_seconds()
+    ago = _span_words(idle_s, lang)
+    live = idle_s <= CONVERSATION_WINDOW_MINUTES * 60
+    if ru:
+        state = f"Последняя реплика {ago} назад"
+        state += " — разговор идёт прямо сейчас. " if live else ". "
+    else:
+        state = f"The last line was {ago} ago"
+        state += " — the conversation is happening right now. " if live else ". "
+
     if ru:
         head = (
             f"{room} С тех пор как ты смотрел: {len(fresh)} сообщений за {span}, "
-            f"из них твоих {mine}, её {hers}. "
+            f"из них твоих {mine}, её {hers}. {state}"
         )
         head += (
             "Ниже — конец разговора, чтобы вспомнить, на чём он остановился, не перечитывать. "
@@ -812,7 +843,7 @@ async def _build_group_chat_block(
     else:
         head = (
             f"{room} Since you last looked: {len(fresh)} messages over {span}, "
-            f"{mine} of them yours, {hers} hers. "
+            f"{mine} of them yours, {hers} hers. {state}"
         )
         head += (
             "Below is the end of the conversation — to recall where it stopped, not to reread. "
@@ -1132,7 +1163,7 @@ async def _run_cycle(account_id: str, api_key: str) -> None:
                 logger.error(
                     "[reflection:%s] step %d produced no text and hit max_tokens (%d) — "
                     "the whole budget went to reasoning. Reflection aborted.",
-                    account_id, step, STEP_MAX_TOKENS,
+                    account_id, step, step_max_tokens(),
                 )
                 _record_failure(account_id, "empty_response_truncated", lang)
                 return
@@ -1140,7 +1171,7 @@ async def _run_cycle(account_id: str, api_key: str) -> None:
             if truncated:
                 logger.warning(
                     "[reflection:%s] step %d hit max_tokens (%d) — the tail is clipped",
-                    account_id, step, STEP_MAX_TOKENS,
+                    account_id, step, step_max_tokens(),
                 )
 
             if not response or not response.strip():

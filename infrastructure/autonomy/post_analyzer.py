@@ -22,6 +22,7 @@ from infrastructure.autonomy.cmd_parser import (
 from infrastructure.autonomy.helpers import detect_lang, get_ai_name, make_llm_client
 from infrastructure.autonomy import context
 from infrastructure.clock import format_local, now_local
+from infrastructure.llm import budgets
 from infrastructure.llm.prompt_loader import get_prompt
 
 from infrastructure.logging.logger import setup_logger
@@ -32,7 +33,8 @@ logger = setup_logger("autonomy.post_analyzer")
 # thinking cannot be turned off. The budget has to cover the reasoning plus the
 # journal entry plus any trailing command — at 2200 more than a third of these
 # replies came back clipped.
-ANALYSIS_MAX_TOKENS = 16000
+# The budget comes from the per-model table when the call is made — the model
+# lives in settings and can change without a restart.
 
 _PROMPTS = "infrastructure/autonomy/prompts/post_analyzer.md"
 
@@ -265,7 +267,7 @@ async def run_post_analysis(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        max_tokens=ANALYSIS_MAX_TOKENS,
+        max_tokens=budgets.for_job(budgets.Job.JOURNAL),
         temperature=0.7,
         return_meta=True,
     )

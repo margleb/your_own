@@ -77,7 +77,11 @@ SILENT = "SILENT"
 # live group: the largest reply, reasoning included, was 2084 tokens. At 16000
 # a dead provider cost 21 minutes of deafness; this is four times the largest
 # real reply and half that wait.
-REPLY_MAX_TOKENS = 8000
+def reply_max_tokens() -> int:
+    """A room reply's budget, for whichever model settings names now."""
+    from infrastructure.llm import budgets
+
+    return budgets.for_job(budgets.Job.ROOM_REPLY)
 # A link opened, then an answer: two rounds is the normal case, three the limit.
 MAX_ROUNDS = 3
 MAX_FETCHES_PER_ROUND = 2
@@ -723,7 +727,7 @@ async def compose(
 
     for round_no in range(1, MAX_ROUNDS + 1):
         response, finish_reason = await client.complete(
-            messages=messages, max_tokens=REPLY_MAX_TOKENS, temperature=0.7, return_meta=True,
+            messages=messages, max_tokens=reply_max_tokens(), temperature=0.7, return_meta=True,
         )
         response = (response or "").strip()
         if not response and finish_reason != "length":

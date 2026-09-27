@@ -31,11 +31,15 @@ logger = logging.getLogger("autonomy.rotator")
 
 _PROMPTS_DIR = "infrastructure/autonomy/prompts"
 
-# A reasoning model bills its thinking against max_tokens, and on the Claude Fable family
-# thinking cannot be turned off. Every rotator step writes at most a few
-# thousand characters, but the budget has to cover the reasoning in front of
-# that — at 1500 nearly half of these replies came back clipped.
-_STEP_MAX_TOKENS = 16000
+# A reasoning model bills its thinking against max_tokens. Every rotator step
+# writes at most a few thousand characters, but the budget has to cover the
+# reasoning in front of that — at 1500 nearly half of these replies came back
+# clipped. How much room that is depends on the model, so it lives in one table.
+def _step_max_tokens() -> int:
+    """One rotator step's budget, for whichever model settings names now."""
+    from infrastructure.llm import budgets
+
+    return budgets.for_job(budgets.Job.STEP)
 
 
 async def _complete(
@@ -43,7 +47,7 @@ async def _complete(
     system: str,
     user: str,
     temperature: float = 0.4,
-    max_tokens: int = 650,
+    max_tokens: int | None = None,
 ) -> str:
     client = make_llm_client(api_key)
     return await client.complete(
@@ -51,7 +55,7 @@ async def _complete(
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        max_tokens=max_tokens,
+        max_tokens=_step_max_tokens() if max_tokens is None else max_tokens,
         temperature=temperature,
     )
 
@@ -114,7 +118,7 @@ async def _extract_self_insights(
         notes=notes_block,
     )
     sys_msg = "Верни только строки. Без пояснений." if lang == "ru" else "Return only lines. No explanations."
-    raw = await _complete(api_key, sys_msg, user_prompt, temperature=0.7, max_tokens=_STEP_MAX_TOKENS)
+    raw = await _complete(api_key, sys_msg, user_prompt, temperature=0.7, max_tokens=_step_max_tokens())
     if not raw or raw.strip().lower() in ("нет ключевой информации", "no key information"):
         return 0
 
@@ -177,7 +181,7 @@ async def _review_identity(
         notes=notes_block,
         people=_people_for_review(account_id, lang),
     )
-    raw = await _complete(api_key, sys_prompt, user_prompt, temperature=0.7, max_tokens=_STEP_MAX_TOKENS)
+    raw = await _complete(api_key, sys_prompt, user_prompt, temperature=0.7, max_tokens=_step_max_tokens())
     if not raw or raw.strip().lower() in ("нет", "no"):
         return False
 
@@ -286,7 +290,7 @@ async def _sort_group_notes(
             path, lang=lang, section="sort_user", index=index,
             notes="\n---\n".join(f"[{ts}]\n{body}" for ts, body in candidates),
         ),
-        temperature=0.3, max_tokens=_STEP_MAX_TOKENS,
+        temperature=0.3, max_tokens=_step_max_tokens(),
     )
     moved = _apply_about_lines(account_id, raw, lang)
     logger.info("[rotator:%s] address book: %d fact(s) moved from %d note(s)", account_id, moved, len(candidates))
@@ -360,7 +364,7 @@ async def fill_book_from_chat(account_id: str, api_key: str, rows: list, lang: s
                 index=people.render_index(account_id) or ("(пусто)" if lang == "ru" else "(empty)"),
                 transcript=responder.render_room(chunk, ai_name=ai_name, lang=lang, with_dates=True),
             ),
-            temperature=0.3, max_tokens=_STEP_MAX_TOKENS,
+            temperature=0.3, max_tokens=_step_max_tokens(),
         )
         written = _apply_about_lines(account_id, raw, lang, tg_by_name)
         total += written
@@ -468,7 +472,7 @@ async def _review_my_people(account_id: str, api_key: str, lang: str) -> int:
         api_key,
         load_prompt(path, lang=lang, section="section_system").format(**fields),
         load_prompt(path, lang=lang, section="section_user").format(**fields),
-        temperature=0.6, max_tokens=_STEP_MAX_TOKENS,
+        temperature=0.6, max_tokens=_step_max_tokens(),
     )
     # The stamp moves either way: a "no" is an answer about this book, and
     # asking again before he writes another card would buy the same answer.
@@ -509,7 +513,7 @@ async def _consolidate_people(account_id: str, api_key: str, lang: str) -> int:
                 path, lang=lang, section="consolidate_user", name=person.name,
                 count=len(person.lines), card=people.render_card(person, max_chars=20000),
             ),
-            temperature=0.4, max_tokens=_STEP_MAX_TOKENS,
+            temperature=0.4, max_tokens=_step_max_tokens(),
         )
         lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip().startswith("- ")]
         # A rebuild that comes back longer, or empty, is not a rebuild.
@@ -560,7 +564,7 @@ async def _consolidate_identity(
             notes=notes,
         )
 
-        raw = await _complete(api_key, sys_prompt, user_prompt, temperature=0.7, max_tokens=_STEP_MAX_TOKENS)
+        raw = await _complete(api_key, sys_prompt, user_prompt, temperature=0.7, max_tokens=_step_max_tokens())
         if not raw:
             continue
 
@@ -639,7 +643,7 @@ async def _promote_canon(
     sys_prompt = load_prompt(path, lang=lang, section="system").format(**fields)
     user_prompt = load_prompt(path, lang=lang, section="user").format(**fields)
 
-    raw = await _complete(api_key, sys_prompt, user_prompt, temperature=0.7, max_tokens=_STEP_MAX_TOKENS)
+    raw = await _complete(api_key, sys_prompt, user_prompt, temperature=0.7, max_tokens=_step_max_tokens())
     if not raw or raw.strip().lower() in ("нет", "no"):
         logger.info("[rotator:%s] canon: nothing ready to promote", account_id)
         return 0

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from infrastructure.llm import budgets
 from infrastructure.llm.prompt_loader import get_prompt
 
 logger = logging.getLogger("agents.research")
@@ -33,8 +34,9 @@ DEFAULT_MAX_ATTEMPTS = 3
 # Searcher models reason before they answer, and the thinking is billed against
 # max_tokens — a one-line verdict still needs headroom or it comes back as a
 # handful of characters that happen to parse.
-JUDGE_MAX_TOKENS = 800
-BRIEF_MAX_TOKENS = 6000
+# Both budgets come from the per-model table, read when the call is made
+# rather than when this module is imported: the model lives in settings and can
+# change without a restart. See infrastructure/llm/budgets.py.
 
 _REFINE_RE = re.compile(r"REFINE\s*:\s*(.+)", re.IGNORECASE | re.DOTALL)
 _SENTENCE_END_RE = re.compile(r"[.!?…](?=\s|$)")
@@ -266,7 +268,7 @@ class ResearchAgent:
                 tried=" | ".join(queries),
                 found=found,
             ),
-            max_tokens=JUDGE_MAX_TOKENS,
+            max_tokens=budgets.for_job(budgets.Job.VERDICT, ctx.model),
         )
         if not verdict:
             return None
@@ -311,7 +313,7 @@ class ResearchAgent:
         brief, truncated = await self._complete(
             system=ctx.prompt("brief_system"),
             user=ctx.prompt("brief_user", task=task, material=material),
-            max_tokens=BRIEF_MAX_TOKENS,
+            max_tokens=budgets.for_job(budgets.Job.BRIEF, ctx.model),
         )
         if not brief:
             return material[:2000]

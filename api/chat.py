@@ -45,7 +45,7 @@ from infrastructure.language import detect_or_soul
 from infrastructure.memory.retrieval import humanize_timestamp
 from infrastructure.memory.chroma_pipeline import get_chroma_pipeline
 from infrastructure.auth import require_auth
-from infrastructure.autonomy import context
+from infrastructure.autonomy import context, live_reply
 from infrastructure.paths import GENERATED_IMAGES_DIR, LOGS_DIR, USER_UPLOADS_DIR
 from infrastructure.skills import registry as skill_registry
 from infrastructure.skills.base import SkillContext
@@ -1301,6 +1301,10 @@ async def chat(
         # Guards the partial-save paths below: once the real row is in, a later
         # failure must not write a second, clipped copy of the same reply.
         saved_assistant = False
+        # While this is open, a scheduled push waits for it: the push is reviewed
+        # against the dialogue, and the dialogue is not whole until this reply is
+        # in it. Released in the `finally` at the end of this same try.
+        live_reply.begin(resolve(account_id))
         try:
             # The toggle and [WEB_SEARCH: ...] both go through the one
             # orchestrator; this is the toggle's path.
@@ -1450,6 +1454,9 @@ async def chat(
                 await _save_partial(pair_id, account_id, streamed.text)
             yield _sse_error(str(e) or e.__class__.__name__, pair_id)
             yield _SSE_DONE
+
+        finally:
+            live_reply.end(resolve(account_id))
 
     return StreamingResponse(
         event_stream(),

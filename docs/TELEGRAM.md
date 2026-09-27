@@ -280,7 +280,7 @@ The group's modules log through the project's `setup_logger`, so `journalctl -u 
 Two things worth knowing when the room seems quiet:
 
 - A reply is composed **inside** the polling task. While he thinks — minutes, on a reasoning model with a web search — the room is not being polled. Nothing is lost: Telegram holds the messages and the next poll takes them as one batch, answered once.
-- The reply budget is `REPLY_MAX_TOKENS` (8000). It also sets how long the client waits for the provider (`max_tokens // 25` seconds, three attempts). At 16000 a dead provider once cost 21 minutes of deafness, logged as "chose silence"; both are fixed, and the constant is the place to look if it happens again.
+- The reply budget comes from `budgets.Job.ROOM_REPLY` — the visible answer plus room for the model to think, per model (`infrastructure/llm/budgets.py`). It also sets how long the client waits for the provider (`max_tokens // 25` seconds, three attempts). At 16000 a dead provider once cost 21 minutes of deafness, logged as "chose silence"; both are fixed, and the table is the place to look if it happens again.
 
 Restart the backend only when the last responder line is an outcome (`said`, `chose silence`, `a failure`): the listener acknowledges messages before he answers, so a restart mid-reply loses that reply for good.
 

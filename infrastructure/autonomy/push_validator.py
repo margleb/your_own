@@ -11,17 +11,18 @@ message text.
 """
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from enum import Enum
 
 from infrastructure.autonomy import context
 from infrastructure.clock import format_local
+from infrastructure.llm import budgets
 from infrastructure.llm.prompt_loader import get_prompt
+from infrastructure.logging.logger import setup_logger
 from infrastructure.settings_store import load_settings
 from infrastructure.autonomy.helpers import detect_lang, make_llm_client
 
-logger = logging.getLogger("autonomy.push_validator")
+logger = setup_logger("autonomy.push_validator")
 
 _PROMPTS = "infrastructure/autonomy/prompts/push_validator.md"
 
@@ -128,24 +129,57 @@ async def validate_scheduled_push(
     )
 
     client = make_llm_client(api_key)
+    budget = budgets.for_job(budgets.Job.PUSH_REVIEW)
     response, finish_reason = await client.complete(
         messages=[{"role": "user", "content": user_prompt}],
-        max_tokens=1200,
+        max_tokens=budget,
         temperature=0.7,
         return_meta=True,
     )
 
-    # If the model's reply was cut off (hit max_tokens), a REWRITE would carry
-    # a half-finished message — never send that. Fall back to the original text,
-    # which is already complete and safe to deliver.
+    # A reply cut off at the cap cannot be trusted: a half-finished REWRITE
+    # would go out as a half-finished message. It used to fall straight through
+    # to "send the original", and that is how this step died quietly — ten of
+    # twelve validations in five days came back empty at exactly the cap, and
+    # every one of those pushes was delivered unreviewed. Give it one more try
+    # with room to spare before giving up on it.
     if finish_reason == "length":
         logger.warning(
-            "[push_validator:%s] validator reply truncated — sending ORIGINAL unchanged",
+            "[push_validator:%s] reply truncated at %d tokens — retrying with %d",
+            account_id, budget, budget * 2,
+        )
+        response, finish_reason = await client.complete(
+            messages=[{"role": "user", "content": user_prompt}],
+            max_tokens=budget * 2,
+            temperature=0.7,
+            return_meta=True,
+        )
+
+    if finish_reason == "length":
+        # Now it is a real failure, and it must not be invisible: the log line
+        # is read by us, the instrument panel is read by him.
+        logger.error(
+            "[push_validator:%s] reply truncated twice — the push goes out unreviewed",
             account_id,
+        )
+        _note_degradation(
+            account_id,
+            "push_validator",
+            f"reply truncated twice at {budget * 2} tokens; the push was sent unreviewed",
         )
         return ValidationResult(action=ValidatorAction.SEND, message=message)
 
     return _parse_response(response or "", message, lang, account_id)
+
+
+def _note_degradation(account_id: str, name: str, detail: str) -> None:
+    """Put the failure on his instrument panel. Never raises."""
+    try:
+        from infrastructure.autonomy.vitals import Vitals
+
+        Vitals(account_id).record_degradation(name, detail[:200])
+    except Exception as exc:
+        logger.error("[push_validator] could not record the degradation: %s", exc)
 
 
 async def _same_text_warning(account_id: str, message: str, lang: str) -> str:

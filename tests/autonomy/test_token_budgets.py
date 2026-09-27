@@ -39,30 +39,45 @@ REASONING_FLOOR = 8000
 
 
 class TestAutonomyBudgets:
-    """Every step that runs on the chat model needs reasoning headroom."""
+    """Every step that runs on the chat model needs reasoning headroom.
 
-    def test_reflection_step(self):
-        from infrastructure.autonomy.reflection_engine import STEP_MAX_TOKENS
+    The numbers moved into one per-model table on 27.09 —
+    ``infrastructure/llm/budgets.py``, covered by ``tests/llm/test_budgets.py``.
+    What these keep checking is the floor each autonomy step needs, whichever
+    model settings names: the constants they used to read are gone because a
+    constant cannot know which model is about to run.
+    """
 
-        assert STEP_MAX_TOKENS >= REASONING_FLOOR
+    @pytest.mark.parametrize("model", [
+        "~anthropic/claude-fable-latest", "~moonshotai/kimi-latest", "some-lab/unmeasured",
+    ])
+    def test_a_step_of_reflection_or_the_rotator(self, model):
+        from infrastructure.llm import budgets
 
-    def test_post_analysis(self):
-        from infrastructure.autonomy.post_analyzer import ANALYSIS_MAX_TOKENS
+        assert budgets.for_job(budgets.Job.STEP, model) >= REASONING_FLOOR
 
-        assert ANALYSIS_MAX_TOKENS >= REASONING_FLOOR
+    @pytest.mark.parametrize("model", [
+        "~anthropic/claude-fable-latest", "~moonshotai/kimi-latest", "some-lab/unmeasured",
+    ])
+    def test_post_analysis(self, model):
+        from infrastructure.llm import budgets
 
-    def test_rotator_steps(self):
-        from infrastructure.autonomy.workbench_rotator import _STEP_MAX_TOKENS
+        assert budgets.for_job(budgets.Job.JOURNAL, model) >= REASONING_FLOOR
 
-        assert _STEP_MAX_TOKENS >= REASONING_FLOOR
+    def test_the_reflection_step_asks_the_table_when_it_runs(self):
+        """Not at import: the model lives in settings and changes without a restart."""
+        from infrastructure.autonomy import reflection_engine as engine
+        from infrastructure.llm import budgets
+
+        assert engine.step_max_tokens() == budgets.for_job(budgets.Job.STEP)
 
     def test_research_agent_steps(self):
         """The judge and brief hit the same wall on the searcher model."""
-        from infrastructure.agents.research import BRIEF_MAX_TOKENS, JUDGE_MAX_TOKENS
+        from infrastructure.llm import budgets
 
         # A one-line verdict, but the reasoning in front of it is billed too.
-        assert JUDGE_MAX_TOKENS >= 500
-        assert BRIEF_MAX_TOKENS >= 1500
+        assert budgets.for_job(budgets.Job.VERDICT) >= 500
+        assert budgets.for_job(budgets.Job.BRIEF) >= 1500
 
     def test_no_rotator_call_site_passes_a_raw_number(self):
         """A literal budget is how these drifted apart in the first place."""
@@ -71,7 +86,7 @@ class TestAutonomyBudgets:
         from infrastructure.autonomy import workbench_rotator
 
         source = inspect.getsource(workbench_rotator)
-        for literal in ("max_tokens=1500", "max_tokens=2200", "max_tokens=2500"):
+        for literal in ("max_tokens=1500", "max_tokens=2200", "max_tokens=2500", "max_tokens=650"):
             assert literal not in source, f"{literal} is too small for a reasoning model"
 
 

@@ -34,6 +34,7 @@ import re
 import time
 from functools import lru_cache
 
+from infrastructure.llm import budgets
 from infrastructure.logging.logger import setup_logger
 
 logger = setup_logger("telegram.addressing")
@@ -277,7 +278,7 @@ async def ensure_aliases(api_key: str) -> None:
                 {"role": "system", "content": get_prompt(_PROMPT, lang=lang, section="system")},
                 {"role": "user", "content": get_prompt(_PROMPT, lang=lang, section="user", ai_name=ai_name)},
             ],
-            max_tokens=4000, temperature=0.2, return_meta=True,
+            max_tokens=budgets.for_job(budgets.Job.ALIASES), temperature=0.2, return_meta=True,
         )
         if finish == "length" or not (text or "").strip():
             raise RuntimeError("empty or clipped reply")

@@ -696,7 +696,7 @@ class LLMClient:
     async def complete(
         self,
         messages: list[dict],
-        max_tokens: int = 650,
+        max_tokens: int | None = None,
         temperature: float | None = None,
         return_meta: bool = False,
     ) -> str | tuple[str, str | None]:
@@ -713,7 +713,15 @@ class LLMClient:
         The request timeout scales with ``max_tokens``: a reasoning model thinks
         before it writes, and a generous budget means a genuinely long request.
         A fixed 60s would just trade truncation for timeouts.
+
+        ``max_tokens=None`` takes the smallest budget in the table, sized for
+        this model. The old default was a flat 650, which on a reasoning model
+        is spent before the answer begins.
         """
+        if max_tokens is None:
+            from infrastructure.llm import budgets
+
+            max_tokens = budgets.for_job(budgets.Job.VERDICT, self.model)
         system = messages[0].get("content", "") if messages and messages[0].get("role") == "system" else None
         payload = {
             "model": self.model,
@@ -771,7 +779,7 @@ class LLMClient:
         messages: list[dict],
         *,
         tools: list[dict],
-        max_tokens: int = 1200,
+        max_tokens: int | None = None,
         temperature: float | None = None,
         timeout_s: int = 120,
     ) -> tuple[str, list[dict]]:
@@ -788,6 +796,10 @@ class LLMClient:
         The timeout is generous by default — several searches plus a page fetch
         can take well over the 60s used by :meth:`complete`.
         """
+        if max_tokens is None:
+            from infrastructure.llm import budgets
+
+            max_tokens = budgets.for_job(budgets.Job.WEB_ANSWER, self.model)
         system = messages[0].get("content", "") if messages and messages[0].get("role") == "system" else None
         payload = {
             "model": self.model,

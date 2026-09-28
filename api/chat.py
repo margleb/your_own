@@ -12,6 +12,7 @@ Unlike the original proxy implementation, this endpoint now:
   - supports [GENERATE_IMAGE: model | prompt] image generation skill
 """
 
+#region Импорты
 from __future__ import annotations
 
 from infrastructure.account import ACCOUNT_ID, resolve
@@ -50,7 +51,9 @@ from infrastructure.paths import GENERATED_IMAGES_DIR, LOGS_DIR, USER_UPLOADS_DI
 from infrastructure.skills import registry as skill_registry
 from infrastructure.skills.base import SkillContext
 from settings import settings
+#endregion
 
+#region Настройка журналирования, каталогов и маршрутизатора
 logger = setup_logger("chat")
 MAX_CHAT_IMAGES = 8
 
@@ -63,9 +66,7 @@ for _directory in (LOGS_DIR, GENERATED_IMAGES_DIR, USER_UPLOADS_DIR):
 _DBG_PATH = LOGS_DIR / "chat_debug.log"
 _dbg_logger = logging.getLogger("chat.trace")
 if not _dbg_logger.handlers:
-    _dbg_handler = RotatingFileHandler(
-        _DBG_PATH, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
-    )
+    _dbg_handler = RotatingFileHandler(_DBG_PATH, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
     _dbg_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     _dbg_logger.addHandler(_dbg_handler)
     _dbg_logger.setLevel(logging.DEBUG)
@@ -78,25 +79,42 @@ def _dbg(msg: str) -> None:
     except Exception:
         pass
 
+
 _dbg("MODULE_LOADED")
 
 router = APIRouter(prefix="/api", tags=["chat"], dependencies=[Depends(require_auth)])
+#endregion
 
 
+#region Типы вложений, сохранение файлов и API загрузки
 # Extension per MIME type, both directions. Pictures are not the only thing she
 # sends any more: the models also read documents, audio and short clips, and the
 # stored file has to keep an extension that says which is which — that is what
 # tells us the type when the file is read back from disk later.
 _EXTENSIONS: tuple[tuple[str, str], ...] = (
-    ("image/png", "png"), ("image/webp", "webp"), ("image/gif", "gif"),
+    ("image/png", "png"),
+    ("image/webp", "webp"),
+    ("image/gif", "gif"),
     ("image/jpeg", "jpg"),
     ("application/pdf", "pdf"),
-    ("text/plain", "txt"), ("text/markdown", "md"), ("application/json", "json"),
-    ("text/csv", "csv"), ("text/html", "html"), ("text/xml", "xml"),
-    ("text/x-python", "py"), ("application/x-yaml", "yml"), ("text/plain", "log"),
-    ("audio/mpeg", "mp3"), ("audio/wav", "wav"), ("audio/x-wav", "wav"),
-    ("audio/ogg", "ogg"), ("audio/webm", "weba"), ("audio/mp4", "m4a"),
-    ("video/mp4", "mp4"), ("video/webm", "webm"), ("video/quicktime", "mov"),
+    ("text/plain", "txt"),
+    ("text/markdown", "md"),
+    ("application/json", "json"),
+    ("text/csv", "csv"),
+    ("text/html", "html"),
+    ("text/xml", "xml"),
+    ("text/x-python", "py"),
+    ("application/x-yaml", "yml"),
+    ("text/plain", "log"),
+    ("audio/mpeg", "mp3"),
+    ("audio/wav", "wav"),
+    ("audio/x-wav", "wav"),
+    ("audio/ogg", "ogg"),
+    ("audio/webm", "weba"),
+    ("audio/mp4", "m4a"),
+    ("video/mp4", "mp4"),
+    ("video/webm", "webm"),
+    ("video/quicktime", "mov"),
 )
 # Both directions resolve to the FIRST entry for a repeated key, which is why
 # both are built from the reversed tuple. A type appears twice on purpose —
@@ -161,8 +179,10 @@ async def upload_image(
     content_type = image.content_type or _content_type_of(image.filename or "")
     url = _save_upload(payload, content_type, image.filename or "")
     return {"url": url}
+#endregion
 
 
+#region Фоновый анализ диалога
 async def _post_analyze_background(
     account_id: str,
     recent_pairs: list[dict],
@@ -172,6 +192,7 @@ async def _post_analyze_background(
 ) -> None:
     try:
         from infrastructure.autonomy.post_analyzer import run_post_analysis
+
         await run_post_analysis(
             account_id=account_id,
             recent_pairs=recent_pairs,
@@ -181,8 +202,10 @@ async def _post_analyze_background(
         )
     except Exception as exc:
         logger.warning("[chat] post-analysis error: %s", exc)
+#endregion
 
 
+#region Регистрация сбоев и подготовка текста для журналов
 def _note_degradation(account_id: str, name: str, detail: str) -> None:
     """Record on his own instrument panel that a reply went out incomplete.
 
@@ -201,8 +224,10 @@ def _preview(text: str, limit: int = 180) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: limit - 3] + "..."
+#endregion
 
 
+#region Поиск и форматирование фактов долговременной памяти
 def _build_chroma_block(facts: list[dict], language: str) -> str:
     """
     Format Chroma facts into a memory block injected as an assistant message
@@ -216,6 +241,7 @@ def _build_chroma_block(facts: list[dict], language: str) -> str:
         if created_at_str:
             try:
                 from datetime import timezone as _tz
+
                 created_at_dt = datetime.fromisoformat(created_at_str)
                 if created_at_dt.tzinfo is None:
                     created_at_dt = created_at_dt.replace(tzinfo=_tz.utc)
@@ -254,7 +280,10 @@ async def _recall(account_id: str, text: str, language: str, cutoff_days: int) -
         facts = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: pipeline.query_similar_multi(
-                account_id=account_id, message=text, top_k=5, days_cutoff=cutoff_days,
+                account_id=account_id,
+                message=text,
+                top_k=5,
+                days_cutoff=cutoff_days,
             ),
         )
     except Exception as exc:
@@ -270,23 +299,25 @@ async def _recall(account_id: str, text: str, language: str, cutoff_days: int) -
     for fact in facts:
         meta = fact.get("metadata") or {}
         stamp = meta.get("created_at")
-        for_ui.append({
-            "id": fact.get("id", ""),
-            "text": fact.get("text", ""),
-            "category": meta.get("category", ""),
-            "impressive": meta.get("impressive", 0),
-            "time_label": humanize_timestamp(
-                datetime.fromisoformat(stamp) if stamp else None, language
-            ),
-        })
+        for_ui.append(
+            {
+                "id": fact.get("id", ""),
+                "text": fact.get("text", ""),
+                "category": meta.get("category", ""),
+                "impressive": meta.get("impressive", 0),
+                "time_label": humanize_timestamp(datetime.fromisoformat(stamp) if stamp else None, language),
+            }
+        )
 
     return _Recall(
         block=_build_chroma_block(facts, language),
         fact_ids=[fact["id"] for fact in facts],
         for_ui=for_ui,
     )
+#endregion
 
 
+#region Сборка системного промпта
 def _build_system_prompt(inputs: _Inputs, state: dict, skills: list) -> str:
     """Assemble what he is, plus what he can do, into one system prompt.
 
@@ -294,16 +325,12 @@ def _build_system_prompt(inputs: _Inputs, state: dict, skills: list) -> str:
     identity pillar that loads into every conversation; the skills block carries
     the desk and the board with it because the header template asks for them.
     """
-    threads_block = (
-        f"<open_threads>\n{state['open_threads']}\n</open_threads>\n\n"
-        if state["open_threads"] else ""
-    )
-    people_block = (
-        f"<people>\n{state['people']}\n</people>\n\n" if state.get("people") else ""
-    )
-    workbench_block = people_block + threads_block + (
-        f"<workbench>\n{state['workbench']}\n</workbench>\n\n"
-        if state["workbench"] else ""
+    threads_block = f"<open_threads>\n{state['open_threads']}\n</open_threads>\n\n" if state["open_threads"] else ""
+    people_block = f"<people>\n{state['people']}\n</people>\n\n" if state.get("people") else ""
+    workbench_block = (
+        people_block
+        + threads_block
+        + (f"<workbench>\n{state['workbench']}\n</workbench>\n\n" if state["workbench"] else "")
     )
 
     identity = f"<identity>\n{inputs.soul}\n</identity>" if inputs.soul else ""
@@ -316,13 +343,13 @@ def _build_system_prompt(inputs: _Inputs, state: dict, skills: list) -> str:
         timezone_label=state["timezone_label"],
         # A skill that fails to build is a skill he does not have this turn,
         # and the reply looks the same as one where he chose not to use it.
-        on_lost=lambda ids: _note_degradation(
-            inputs.account_id, "skills", ", ".join(ids)
-        ),
+        on_lost=lambda ids: _note_degradation(inputs.account_id, "skills", ", ".join(ids)),
     )
     return identity + canon + instructions
+#endregion
 
 
+#region Передача текстовых фрагментов через SSE
 def _yield_chunk(chunk: str) -> list[str]:
     """One text chunk as SSE ``data:`` lines.
 
@@ -333,8 +360,10 @@ def _yield_chunk(chunk: str) -> list[str]:
     lines = [f"data: {line}\n" for line in chunk.split("\n")]
     lines.append("\n")
     return lines
+#endregion
 
 
+#region Выполнение навыков и продолжение ответа модели
 # How many times he may act, read the result and act again within one turn.
 MAX_AGENT_LOOPS = 5
 
@@ -424,13 +453,11 @@ async def _run_skills(
 
             continuation_prompt = (
                 search_skill.get_cont_hint(inputs.language, MAX_AGENT_LOOPS - round_number)
-                + "\n\n" + continuation_prompt
+                + "\n\n"
+                + continuation_prompt
             )
         if is_last_initial and trailing_text:
-            continuation_prompt += (
-                "\n\n" + skill_registry.get_trailing_hint(inputs.language) + "\n"
-                + trailing_text
-            )
+            continuation_prompt += "\n\n" + skill_registry.get_trailing_hint(inputs.language) + "\n" + trailing_text
 
         continuation_messages = [
             *llm_messages,
@@ -442,9 +469,7 @@ async def _run_skills(
             yield line
 
         parts: list[str] = []
-        async for chunk in inputs.client.stream(
-            messages=continuation_messages, system_prompt=system_prompt
-        ):
+        async for chunk in inputs.client.stream(messages=continuation_messages, system_prompt=system_prompt):
             if not chunk:
                 continue
             parts.append(chunk)
@@ -453,22 +478,18 @@ async def _run_skills(
 
         continuation = "".join(parts).strip()
         _dbg(f"CONTINUATION #{round_number} done len={len(continuation)}")
-        logger.info(
-            "[chat] continuation #%d done text=%s", round_number, _preview(continuation, 260)
-        )
+        logger.info("[chat] continuation #%d done text=%s", round_number, _preview(continuation, 260))
 
         clean, matches = skill_registry.strip_skills(continuation, skills)
         if clean:
             reply.text += "\n\n" + clean
         reply.full += "\n" + cmd_text + "\n\n" + continuation
-        reply.post_matches.extend(
-            (s, m) for s, m in matches if s.action_type == "post"
-        )
-        pending.extend(
-            (s, m) for s, m in matches if s.action_type in ("agentic", "inline")
-        )
+        reply.post_matches.extend((s, m) for s, m in matches if s.action_type == "post")
+        pending.extend((s, m) for s, m in matches if s.action_type in ("agentic", "inline"))
+#endregion
 
 
+#region Поиск в интернете и подготовка результатов для модели
 async def _web_toggle(inputs: _Inputs, llm_messages: list[dict]):
     """Research the user's message up front, narrating progress as SSE.
 
@@ -483,32 +504,32 @@ async def _web_toggle(inputs: _Inputs, llm_messages: list[dict]):
     yield _sse("web_start", {"query": query})
 
     result = None
-    async for done, value in _pump(research(
-        task=inputs.user_text,
-        source=Source.WEB,
-        api_key=inputs.api_key,
-        account_id=inputs.account_id,
-        lang=inputs.language,
-    )):
+    async for done, value in _pump(
+        research(
+            task=inputs.user_text,
+            source=Source.WEB,
+            api_key=inputs.api_key,
+            account_id=inputs.account_id,
+            lang=inputs.language,
+        )
+    ):
         if done:
             result = value
         else:
             yield _SSE_KEEPALIVE
 
-    _dbg(
-        f"WEB_TOGGLE attempts={result.attempts} "
-        f"citations={len(result.citations)} found={result.found}"
-    )
-    logger.info(
-        "[chat] web toggle research attempts=%d found=%s", result.attempts, result.found
-    )
+    _dbg(f"WEB_TOGGLE attempts={result.attempts} citations={len(result.citations)} found={result.found}")
+    logger.info("[chat] web toggle research attempts=%d found=%s", result.attempts, result.found)
 
-    yield _sse("web_results", {
-        "query": query,
-        "brief": result.brief,
-        "sources": [citation.to_dict() for citation in result.citations],
-        "attempts": result.attempts,
-    })
+    yield _sse(
+        "web_results",
+        {
+            "query": query,
+            "brief": result.brief,
+            "sources": [citation.to_dict() for citation in result.citations],
+            "attempts": result.attempts,
+        },
+    )
     yield _sse("web_done", {"query": query})
 
     if result.found:
@@ -531,13 +552,13 @@ def _build_web_block(result, language: str) -> str:
         lines.append("")
         lines.append("Источники:" if language == "ru" else "Sources:")
         for citation in result.citations:
-            lines.append(
-                f"- {citation.title} ({citation.url})" if citation.url else f"- {citation.title}"
-            )
+            lines.append(f"- {citation.title} ({citation.url})" if citation.url else f"- {citation.title}")
     body = "\n".join(lines).strip()
     return f"<web_search>\n{body}\n</web_search>"
+#endregion
 
 
+#region Фоновые задачи и поддержание соединения SSE
 # ── SSE plumbing ─────────────────────────────────────────────────────────────
 #
 # The stream is written by hand, so everything a library would give for free has
@@ -581,8 +602,10 @@ async def _pump(awaitable, *, every: float = _KEEPALIVE_EVERY_S):
     finally:
         if not task.done():
             task.cancel()
+#endregion
 
 
+#region Параметры запроса, клиент модели и преобразование чисел
 @dataclass
 class _Inputs:
     """One chat request, after the form has been read and the settings merged.
@@ -633,8 +656,10 @@ def _as_float(value: Optional[str], default: float) -> float:
         return float(value) if value else default
     except (TypeError, ValueError):
         return default
+#endregion
 
 
+#region Чтение вложений и восстановление имён файлов
 def _content_type_of(filename: str) -> str:
     """The MIME type of a stored attachment, from its extension.
 
@@ -716,8 +741,10 @@ async def _read_attachments(
             items.append((payload, mime, upload.filename or ""))
     urls = [_save_upload(data, mime, name) for data, mime, name in items]
     return items, urls, False
+#endregion
 
 
+#region Разбор формы запроса и загрузка настроек
 async def _read_inputs(
     *,
     messages: str,
@@ -748,14 +775,10 @@ async def _read_inputs(
     except json.JSONDecodeError:
         parsed_messages = []
 
-    latest_user = next(
-        (msg for msg in reversed(parsed_messages) if msg.get("role") == "user"), None
-    )
+    latest_user = next((msg for msg in reversed(parsed_messages) if msg.get("role") == "user"), None)
     user_text = (latest_user or {}).get("content", "") if latest_user else ""
 
-    attachments, upload_urls, from_urls = await _read_attachments(
-        image_urls_json, image, images
-    )
+    attachments, upload_urls, from_urls = await _read_attachments(image_urls_json, image, images)
 
     return _Inputs(
         account_id=resolve(account_id),
@@ -784,8 +807,10 @@ async def _read_inputs(
         upload_urls=upload_urls,
         images_from_urls=from_urls,
     )
+#endregion
 
 
+#region Формирование событий, ошибок и завершения SSE
 def _sse(event: str, payload: dict) -> str:
     """One named SSE event, serialised in one place.
 
@@ -808,10 +833,10 @@ def _sse_error(message: str, pair_id: uuid.UUID) -> str:
     """
     payload = json.dumps({"message": message, "pair_id": str(pair_id)}, ensure_ascii=False)
     return f"event: error\ndata: {payload}\n\n"
+#endregion
 
 
-
-
+#region API удаления сообщений и получения истории диалога
 @router.delete("/chat/pair/{pair_id}")
 async def delete_chat_pair(
     pair_id: str,
@@ -831,7 +856,7 @@ async def chat_history(
     after: Optional[str] = Query(
         None,
         description="Return only pairs newer than this timestamp — what a client "
-                    "asks for when it comes back and wants to know what it missed.",
+        "asks for when it comes back and wants to know what it missed.",
     ),
     db: AsyncSession = Depends(get_db),
 ):
@@ -867,8 +892,10 @@ async def chat_history(
         "next_before": next_before.isoformat() if next_before else None,
         "has_more": has_more,
     }
+#endregion
 
 
+#region Очистка служебных маркеров и сборка сообщений для модели
 _HALLUC_MARKER_RE = re.compile(r"\[GENERATED[_ ]IMAGE:.*?\]", re.DOTALL | re.IGNORECASE)
 
 
@@ -896,19 +923,21 @@ def _assemble_llm_messages(
         if item["user_text"]:
             messages.append({"role": "user", "content": item["user_text"]})
         if item["assistant_text"]:
-            messages.append({
-                "role": "assistant",
-                "content": internal.sub("", item["assistant_text"]).strip(),
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": internal.sub("", item["assistant_text"]).strip(),
+                }
+            )
     if memory_block:
         messages.append({"role": "assistant", "content": memory_block})
     messages.append({"role": "user", "content": user_text})
     return messages
+#endregion
 
 
-def _assistant_rows(
-    pair_id: uuid.UUID, account_id: Optional[str], text_full: str, text_clean: str
-) -> list:
+#region Сохранение полных и частичных ответов ассистента
+def _assistant_rows(pair_id: uuid.UUID, account_id: Optional[str], text_full: str, text_clean: str) -> list:
     """The rows one reply becomes: the canonical text, and chunks for searching.
 
     The two texts differ on purpose. What is stored whole is what she sees,
@@ -947,6 +976,7 @@ async def _save_partial(pair_id: uuid.UUID, account_id: Optional[str], text: str
         return
     try:
         from infrastructure.database.engine import get_db_session
+
         rows = _assistant_rows(pair_id, account_id, text, text)
         await asyncio.get_running_loop().run_in_executor(None, fill_chunk_embeddings, rows)
         async with get_db_session() as _db:
@@ -957,22 +987,24 @@ async def _save_partial(pair_id: uuid.UUID, account_id: Optional[str], text: str
             written = await MessageRepository(_db).bulk_save_if_pair_exists(rows, str(pair_id))
         if not written:
             logger.info(
-                "[chat] dropped a partial reply for pair=%s — the pair was deleted "
-                "while it was being prepared",
+                "[chat] dropped a partial reply for pair=%s — the pair was deleted while it was being prepared",
                 pair_id,
             )
             return
         logger.warning(
             "[chat] saved a partial reply for pair=%s (%d chars) — stream did not finish",
-            pair_id, len(text),
+            pair_id,
+            len(text),
         )
         # A clipped reply is still history, and the client whose stream broke is
         # precisely the one that does not know what was kept.
         publish_pairs_changed(account_id=resolve(account_id), origin="chat")
     except Exception as exc:
         logger.error("[chat] could not save the partial reply for pair=%s: %s", pair_id, exc)
+#endregion
 
 
+#region Разбор ответа и очистка команд навыков
 @dataclass
 class _Parsed:
     """A finished reply, taken apart: what to show, and what to act on."""
@@ -997,28 +1029,27 @@ def _parse_reply(full_text: str, skills: list) -> _Parsed:
     if not actions and post:
         stripped = full_text
         for _, m in sorted(post, key=lambda pair: pair[1].start(), reverse=True):
-            stripped = stripped[:m.start()] + stripped[m.end():]
+            stripped = stripped[: m.start()] + stripped[m.end() :]
         text = re.sub(r"\n{3,}", "\n\n", stripped).strip()
 
     # Anything he wrote after the last command still belongs to her.
     trailing = ""
     if actions:
         last_end = max(m.end() for _, m in actions)
-        tail_clean, _ = skill_registry.strip_skills(
-            _strip_hallucinated_markers(full_text[last_end:]), skills
-        )
+        tail_clean, _ = skill_registry.strip_skills(_strip_hallucinated_markers(full_text[last_end:]), skills)
         trailing = tail_clean.strip()
 
-    return _Parsed(text=text, actions=actions, post=post,
-                   all_matches=all_matches, trailing=trailing)
+    return _Parsed(text=text, actions=actions, post=post, all_matches=all_matches, trailing=trailing)
 
 
 def _strip_raw_commands(text: str, skills: list) -> str:
     """Last pass before storing: no raw command text reaches the database."""
     cleaned = skill_registry.build_cleanup_re(skills).sub("", text)
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+#endregion
 
 
+#region Учёт использованных фактов памяти
 async def _mark_facts_used(fact_ids: list) -> None:
     """Tell Chroma which recalled facts were actually put in front of him.
 
@@ -1034,8 +1065,10 @@ async def _mark_facts_used(fact_ids: list) -> None:
             await loop.run_in_executor(None, lambda fid=fid: pipeline.update_usage(fid))
     except Exception as exc:
         logger.warning("[chat] Chroma update_usage failed: %s", exc)
+#endregion
 
 
+#region Потоковая передача и буферизация первого ответа
 @dataclass
 class _Streamed:
     """What the model has said so far, and whether any of it is being held back."""
@@ -1090,8 +1123,10 @@ async def _stream_initial(
 
         for sse_line in _yield_chunk(chunk):
             yield sse_line
+#endregion
 
 
+#region Сохранение фактов и планирование сообщений после ответа
 async def _apply_post_skills(
     post_matches: list,
     *,
@@ -1120,11 +1155,11 @@ async def _apply_post_skills(
     save_matches = [m for s, m in post_matches if s.id == "save_memory"]
     sched_matches = [m for s, m in post_matches if s.id == "schedule_message"]
     _dbg(
-        f"POST_SKILLS all_post={len(post_matches)} save_matches={len(save_matches)} "
-        f"sched_matches={len(sched_matches)}"
+        f"POST_SKILLS all_post={len(post_matches)} save_matches={len(save_matches)} sched_matches={len(sched_matches)}"
     )
 
     from infrastructure.skills.save_memory.skill import skill as save_skill
+
     results = await save_skill.execute_batch(save_matches, text, ctx)
     logger.info("[chat] save_memory results=%d", len(results))
 
@@ -1137,34 +1172,46 @@ async def _apply_post_skills(
         frames.extend(_yield_chunk(marker))
 
     from infrastructure.skills.schedule_message.skill import skill as sched_skill
+
     await sched_skill.execute_batch(sched_matches, ctx)
 
     return text_full, frames
+#endregion
 
 
+#region Обработка запроса чата
 @router.post("/chat")
 async def chat(
-    messages:    str           = Form(...),
-    model:       Optional[str] = Form(None),
-    api_key:     Optional[str] = Form(None),
-    web_search:  str           = Form("false"),
+    messages: str = Form(...),
+    model: Optional[str] = Form(None),
+    api_key: Optional[str] = Form(None),
+    web_search: str = Form("false"),
     temperature: Optional[str] = Form(None),
-    top_p:       Optional[str] = Form(None),
-    account_id:         Optional[str] = Form(ACCOUNT_ID),
-    history_pairs:      Optional[str] = Form(None),
+    top_p: Optional[str] = Form(None),
+    account_id: Optional[str] = Form(ACCOUNT_ID),
+    history_pairs: Optional[str] = Form(None),
     memory_cutoff_days: Optional[str] = Form(None),
-    system_prompt:  Optional[str] = Form(None),
+    system_prompt: Optional[str] = Form(None),
     image_urls_json: Optional[str] = Form(None, alias="image_urls"),
-    image:          Optional[UploadFile] = File(None),
-    images:         Optional[list[UploadFile]] = File(None),
-    db:             AsyncSession = Depends(get_db),
+    image: Optional[UploadFile] = File(None),
+    images: Optional[list[UploadFile]] = File(None),
+    db: AsyncSession = Depends(get_db),
 ):
+    #region Разбор запроса и подготовка зависимостей
     inputs = await _read_inputs(
-        messages=messages, model=model, api_key=api_key, web_search=web_search,
-        temperature=temperature, top_p=top_p, account_id=account_id,
-        history_pairs=history_pairs, memory_cutoff_days=memory_cutoff_days,
-        system_prompt=system_prompt, image_urls_json=image_urls_json,
-        image=image, images=images,
+        messages=messages,
+        model=model,
+        api_key=api_key,
+        web_search=web_search,
+        temperature=temperature,
+        top_p=top_p,
+        account_id=account_id,
+        history_pairs=history_pairs,
+        memory_cutoff_days=memory_cutoff_days,
+        system_prompt=system_prompt,
+        image_urls_json=image_urls_json,
+        image=image,
+        images=images,
     )
     account_id = inputs.account_id
     api_key = inputs.api_key
@@ -1192,7 +1239,9 @@ async def chat(
         cutoff_days,
         _preview(current_user_text),
     )
+    #endregion
 
+    #region Сохранение сообщения пользователя
     pair_id = uuid.uuid4()
     user_created_at = now_local()
     saved_user = False
@@ -1219,7 +1268,9 @@ async def chat(
         await asyncio.get_running_loop().run_in_executor(None, fill_chunk_embeddings, user_rows)
         await repo.bulk_save(user_rows)
         saved_user = True
+    #endregion
 
+    #region Загрузка истории диалога и памяти
     recent_pairs = await repo.get_recent_canonical_pairs(
         account_id=resolve(account_id),
         limit_pairs=inputs.history_pairs,
@@ -1227,13 +1278,13 @@ async def chat(
     )
     logger.info("[chat] recent history pairs=%d", len(recent_pairs))
 
-    recall = await _recall(
-        inputs.account_id, current_user_text, prompt_language, cutoff_days
-    )
+    recall = await _recall(inputs.account_id, current_user_text, prompt_language, cutoff_days)
     chroma_memory_block = recall.block
     chroma_fact_ids = recall.fact_ids
     chroma_facts_for_ui = recall.for_ui
+    #endregion
 
+    #region Сборка контекста модели и подготовка навыков
     # Which state blocks chat is entitled to is decided in one place for all
     # four consumers — see infrastructure/autonomy/context.py.
     state = context.build(
@@ -1241,7 +1292,8 @@ async def chat(
         # The text is what the address book is searched with: a friend named
         # in her message brings that friend's card, and nothing else does.
         context.Request(
-            account_id=inputs.account_id, lang=prompt_language,
+            account_id=inputs.account_id,
+            lang=prompt_language,
             extras={"text": current_user_text},
         ),
     )
@@ -1289,13 +1341,16 @@ async def chat(
         logger=logger,
         dbg=_dbg,
     )
+    #endregion
 
+    #region Генерация событий SSE
     async def event_stream():
+        #region Инициализация потока и регистрация активного ответа
         # Always emit pair_id first so the client can clean up on error
-        yield _sse("pair_id", {'pair_id': str(pair_id)})
+        yield _sse("pair_id", {"pair_id": str(pair_id)})
 
         if upload_urls and not images_from_urls:
-            yield _sse("image_urls", {'urls': upload_urls})
+            yield _sse("image_urls", {"urls": upload_urls})
 
         streamed = _Streamed()
         # Guards the partial-save paths below: once the real row is in, a later
@@ -1305,7 +1360,9 @@ async def chat(
         # against the dialogue, and the dialogue is not whole until this reply is
         # in it. Released in the `finally` at the end of this same try.
         live_reply.begin(resolve(account_id))
+        #endregion
         try:
+            #region Поиск в интернете и потоковая передача первого ответа
             # The toggle and [WEB_SEARCH: ...] both go through the one
             # orchestrator; this is the toggle's path.
             if do_web_search and current_user_text.strip():
@@ -1332,7 +1389,9 @@ async def chat(
             _dbg(f"STREAM_DONE full_text_len={len(full_text)} buffered={buffering}")
             _dbg(f"FULL_TEXT>>>{full_text}<<<END")
             logger.info("[chat] initial stream done text=%s", _preview(full_text, 260))
+            #endregion
 
+            #region Разбор команд навыков и обновление отображаемого ответа
             # ── Parse all skill commands via registry ─────────────────────
             parsed = _parse_reply(full_text, enabled_skills)
             assistant_text = parsed.text
@@ -1343,24 +1402,30 @@ async def chat(
             has_actions = bool(action_matches)
 
             _dbg(f"PARSED actions={len(action_matches)} post={len(post_matches)} clean_len={len(assistant_text)}")
-            logger.info("[chat] parsed skills actions=%d post=%d clean=%s",
-                        len(action_matches), len(post_matches), _preview(assistant_text, 220))
+            logger.info(
+                "[chat] parsed skills actions=%d post=%d clean=%s",
+                len(action_matches),
+                len(post_matches),
+                _preview(assistant_text, 220),
+            )
 
             if not all_matches:
                 _dbg("NO_SKILLS_DETECTED")
 
             if not has_actions and buffering:
                 _dbg("BUFFER_FLUSH — no actions, flushing buffered post-only text")
-                yield _sse("rewrite", {'text': assistant_text})
+                yield _sse("rewrite", {"text": assistant_text})
 
             if has_actions:
                 _dbg(f"REWRITE clean_text before actions len={len(assistant_text)}")
-                yield _sse("rewrite", {'text': assistant_text})
+                yield _sse("rewrite", {"text": assistant_text})
 
             trailing_text = parsed.trailing
             if trailing_text:
                 _dbg(f"TRAILING_TEXT len={len(trailing_text)}: {trailing_text[:100]}")
+            #endregion
 
+            #region Выполнение навыков и сбор продолжений ответа
             reply = _Reply(
                 text=assistant_text,
                 full=assistant_text_full,
@@ -1380,7 +1445,9 @@ async def chat(
             assistant_text = reply.text
             assistant_text_full = reply.full
             all_post_matches = reply.post_matches
+            #endregion
 
+            #region Выполнение навыков после ответа
             assistant_text_full, post_frames = await _apply_post_skills(
                 all_post_matches,
                 text=assistant_text,
@@ -1389,7 +1456,9 @@ async def chat(
             )
             for frame in post_frames:
                 yield frame
+            #endregion
 
+            #region Очистка и сохранение ответа ассистента
             # ── Final cleanup ────────────────────────────────────────────
             cleaned = _strip_raw_commands(assistant_text_full, enabled_skills)
             if cleaned != assistant_text_full:
@@ -1399,37 +1468,39 @@ async def chat(
             _dbg(f"SAVE_CONTENT>>>{assistant_text_full}<<<END")
 
             if assistant_text_full:
-                assistant_rows = _assistant_rows(
-                    pair_id, account_id, assistant_text_full, assistant_text
-                )
-                await asyncio.get_running_loop().run_in_executor(
-                    None, fill_chunk_embeddings, assistant_rows
-                )
+                assistant_rows = _assistant_rows(pair_id, account_id, assistant_text_full, assistant_text)
+                await asyncio.get_running_loop().run_in_executor(None, fill_chunk_embeddings, assistant_rows)
                 await repo.bulk_save(assistant_rows)
                 saved_assistant = True
                 # The pair is history now. The client that sent it already has
                 # it and will recognise its own by pair_id; every other open
                 # client is why this line exists.
                 publish_pairs_changed(account_id=resolve(account_id), origin="chat")
+            #endregion
 
+            #region Запуск фонового анализа и завершение потока
             # Fire post-dialogue analysis in background (no delay for the user)
-            _spawn_bg(_post_analyze_background(
-                account_id=resolve(account_id),
-                recent_pairs=recent_pairs,
-                current_user_text=current_user_text,
-                current_assistant_text=assistant_text,
-                api_key=api_key,
-            ))
+            _spawn_bg(
+                _post_analyze_background(
+                    account_id=resolve(account_id),
+                    recent_pairs=recent_pairs,
+                    current_user_text=current_user_text,
+                    current_assistant_text=assistant_text,
+                    api_key=api_key,
+                )
+            )
 
             await _mark_facts_used(chroma_fact_ids)
 
             # Use the same chroma_facts that were injected into the model (no second query)
-            yield _sse("memory", {'chroma_facts': chroma_facts_for_ui})
+            yield _sse("memory", {"chroma_facts": chroma_facts_for_ui})
 
             # save_memory_results are now embedded in the text as [SAVED_FACT: ...] markers
 
             yield _SSE_DONE
+            #endregion
 
+        #region Обработка прерываний и ошибок, снятие отметки активного ответа
         except (asyncio.CancelledError, GeneratorExit):
             # The client hung up. Nothing may be yielded from here — a generator
             # that yields while closing raises "async generator ignored
@@ -1439,7 +1510,9 @@ async def chat(
             _dbg(f"CLIENT_GONE partial_len={len(partial)}")
             logger.info(
                 "[chat] client disconnected for account=%s pair=%s after %d chars",
-                account_id, pair_id, len(partial),
+                account_id,
+                pair_id,
+                len(partial),
             )
             if partial and not saved_assistant:
                 _spawn_bg(_save_partial(pair_id, account_id, partial))
@@ -1447,6 +1520,7 @@ async def chat(
 
         except Exception as e:
             import traceback
+
             _dbg(f"EXCEPTION: {e}\n{traceback.format_exc()}")
             logger.exception("[chat] Streaming error for account=%s: %s", account_id, e)
             # The session is still alive here, so save inline rather than detached.
@@ -1457,7 +1531,10 @@ async def chat(
 
         finally:
             live_reply.end(resolve(account_id))
+        #endregion
+    #endregion
 
+    #region Возврат потокового ответа SSE
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
@@ -1466,3 +1543,5 @@ async def chat(
             "X-Accel-Buffering": "no",
         },
     )
+    #endregion
+#endregion

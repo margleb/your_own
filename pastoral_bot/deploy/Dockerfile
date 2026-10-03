@@ -17,10 +17,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=pg-client /usr/lib/postgresql/16/bin/pg_dump /usr/local/bin/pg_dump
 COPY --from=pg-client /usr/lib/postgresql/16/bin/pg_restore /usr/local/bin/pg_restore
 WORKDIR /app
-COPY pastoral_bot/requirements.txt /tmp/pastoral-requirements.txt
 # Install CPU wheels explicitly: the ordinary PyPI torch build brings CUDA.
-RUN python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu \
-    && python -m pip install --no-cache-dir -r /tmp/pastoral-requirements.txt \
+RUN python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+COPY pastoral_bot/requirements.txt /tmp/pastoral-requirements.txt
+RUN python -m pip install --no-cache-dir -r /tmp/pastoral-requirements.txt \
     && pg_dump --version && pg_restore --version
 COPY pastoral_bot /app/pastoral_bot
 COPY infrastructure/__init__.py infrastructure/paths.py /app/infrastructure/

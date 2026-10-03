@@ -173,10 +173,11 @@ class TestWhatACallCost:
     def test_the_provider_is_asked_for_the_cost(self):
         # Cost is not in a response unless the request asks for it, and it is
         # asked for on every kind of call: chat, his own thinking, search,
-        # images. Four payloads, four asks.
+        # images, and the isolated bot's private structured completion.
+        # Five payloads, five asks; private calls still need billing metadata.
         source = pathlib.Path("infrastructure/llm/client.py").read_text(encoding="utf-8")
 
-        assert source.count('"usage": {"include": True}') == 4
+        assert source.count('"usage": {"include": True}') == 5
 
     def test_what_the_provider_reported_is_written_down(self, tmp_path, monkeypatch):
         from infrastructure.llm import call_log as log

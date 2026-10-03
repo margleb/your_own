@@ -1,0 +1,15 @@
+[Unit]
+Description=Enforce seven day pastoral backup retention
+
+[Service]
+Type=oneshot
+User=pastoral
+Group=pastoral
+WorkingDirectory=/opt/your_own
+EnvironmentFile=/etc/pastoral-bot.env
+ExecStart=/opt/your_own/.venv/bin/python -m pastoral_bot prune-backups
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pastoral-bot

@@ -1,0 +1,4 @@
+# The shared test fixtures also exercise modules of the original application.
+-r requirements.txt
+-r ../requirements.txt
+aiosqlite>=0.20

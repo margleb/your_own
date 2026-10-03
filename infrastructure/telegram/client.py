@@ -10,6 +10,7 @@ settings page is in force on the next poll without a restart.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import aiohttp
@@ -31,10 +32,11 @@ CAPTION_MAX_CHARS = 1024
 
 
 class TelegramError(RuntimeError):
-    def __init__(self, status: int, description: str = "") -> None:
+    def __init__(self, status: int, description: str = "", *, retry_after: float | None = None) -> None:
         super().__init__(f"telegram {status}: {description}")
         self.status = status
         self.description = description
+        self.retry_after = retry_after
 
     @property
     def conflict(self) -> bool:
@@ -48,35 +50,60 @@ class TelegramError(RuntimeError):
 
 
 class TelegramClient:
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, *, session: aiohttp.ClientSession | None = None, private: bool = False) -> None:
         self.token = token
+        self.session = session
+        self.private = private
 
     def _url(self, method: str) -> str:
         return f"{_API}/bot{self.token}/{method}"
 
     async def _call(self, method: str, params: dict | None = None, *, http_timeout: float) -> Any:
         payload = {k: v for k, v in (params or {}).items() if v is not None}
+        async def request(session):
+            async with session.post(
+                self._url(method), json=payload,
+                timeout=aiohttp.ClientTimeout(total=http_timeout),
+            ) as resp:
+                return await resp.json(content_type=None)
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self._url(method), json=payload,
-                    timeout=aiohttp.ClientTimeout(total=http_timeout),
-                ) as resp:
-                    body = await resp.json(content_type=None)
-        except aiohttp.ClientError as exc:
+            if self.session is not None:
+                body = await request(self.session)
+            else:
+                async with aiohttp.ClientSession() as session:
+                    body = await request(session)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            if self.private:
+                raise TelegramError(0, "network_or_decode") from None
             raise TelegramError(0, f"network: {exc}") from exc
 
         if not isinstance(body, dict) or not body.get("ok"):
             if isinstance(body, dict):
-                raise TelegramError(int(body.get("error_code", 0)), str(body.get("description", "")))
-            raise TelegramError(0, str(body))
+                parameters = body.get("parameters")
+                parameters = parameters if isinstance(parameters, dict) else {}
+                try:
+                    status = int(body.get("error_code", 0))
+                except (ValueError, TypeError):
+                    status = 0
+                try:
+                    retry_after = float(parameters.get("retry_after"))
+                    if not math.isfinite(retry_after) or retry_after < 0:
+                        retry_after = None
+                except (ValueError, TypeError):
+                    retry_after = None
+                raise TelegramError(
+                    status,
+                    "api_error" if self.private else str(body.get("description", "")),
+                    retry_after=retry_after,
+                )
+            raise TelegramError(0, "invalid_response" if self.private else str(body))
         return body.get("result")
 
     async def get_me(self) -> dict:
         """Who the bot is: id and username. Cached by the listener."""
         return await self._call("getMe", http_timeout=15)
 
-    async def get_updates(self, offset: int | None, timeout: int = 25) -> list[dict]:
+    async def get_updates(self, offset: int | None, timeout: int = 25, *, allowed_updates: list[str] | None = None) -> list[dict]:
         """One long poll. Returns the raw updates, possibly none.
 
         Only ``message`` updates are asked for: edits, reactions and member
@@ -85,7 +112,7 @@ class TelegramClient:
         """
         result = await self._call(
             "getUpdates",
-            {"offset": offset, "timeout": timeout, "allowed_updates": ["message"]},
+            {"offset": offset, "timeout": timeout, "allowed_updates": allowed_updates or ["message"]},
             http_timeout=timeout + 10,
         )
         return list(result or [])
@@ -96,16 +123,22 @@ class TelegramClient:
         text: str,
         *,
         reply_to_message_id: int | None = None,
+        reply_markup: dict | None = None,
     ) -> dict:
         """Post to the room. Returns the sent message as Telegram reports it."""
         if len(text) > MESSAGE_MAX_CHARS:
-            logger.warning("[telegram] message of %d chars cut to %d", len(text), MESSAGE_MAX_CHARS)
-            text = text[:MESSAGE_MAX_CHARS]
+            raise ValueError("Telegram message exceeds 4096 characters; split it before sending")
         return await self._call(
             "sendMessage",
-            {"chat_id": chat_id, "text": text, "reply_to_message_id": reply_to_message_id},
+            {"chat_id": chat_id, "text": text, "reply_to_message_id": reply_to_message_id, "reply_markup": reply_markup},
             http_timeout=20,
         )
+
+    async def answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
+        await self._call("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text}, http_timeout=15)
+
+    async def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
+        await self._call("sendChatAction", {"chat_id": chat_id, "action": action}, http_timeout=10)
 
 
     async def send_photo(

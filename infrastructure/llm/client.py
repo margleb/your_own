@@ -9,13 +9,15 @@ Supports:
 - SSE streaming: yields text chunks as they arrive
 - Image generation via modalities: ["image", "text"] (non-streaming call)
 
-Every call is recorded in full by ``call_log`` — see that module: it is a
-corpus kept forever, not a log that rotates away.
+Personal-service calls are recorded in full by ``call_log`` — see that module:
+it is a corpus kept forever. The explicitly private structured path records
+only numeric metadata and never calls that corpus writer.
 """
 
 import asyncio
 import base64
 import json
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
@@ -58,6 +60,15 @@ class OpenRouterError(RuntimeError):
     @property
     def retryable(self) -> bool:
         return self.status in RETRYABLE_STATUSES
+
+
+class PrivateLLMError(RuntimeError):
+    """A content-free transport failure for callers with private conversations."""
+
+    def __init__(self, code: str, status: int | None = None):
+        self.code = code
+        self.status = status
+        super().__init__(code)
 
 
 def _retry_delay(attempt: int, retry_after: float | None = None) -> float:
@@ -430,19 +441,25 @@ class LLMClient:
         model: str = "",
         temperature: float = 0.7,
         top_p: float = 0.9,
+        *,
+        private_transport: bool = False,
     ):
-        from infrastructure.settings_store import DEFAULT_MODEL
         self.api_key = api_key
-        self.model = model or DEFAULT_MODEL
+        if model:
+            self.model = model
+        else:
+            from infrastructure.settings_store import DEFAULT_MODEL
+            self.model = DEFAULT_MODEL
         self.temperature = temperature
         self.top_p = top_p
+        self.private_transport = private_transport
 
     def _headers(self) -> dict:
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "https://github.com/your-own-app",
-            "X-Title": "Your Own",
+            "X-Title": "Pastoral Bot" if self.private_transport else "Your Own",
         }
 
     def _build_messages(
@@ -517,7 +534,9 @@ class LLMClient:
                 json=payload,
             ) as response:
                 if response.status != 200:
-                    body = await response.text()
+                    # Provider error bodies can echo an entire private prompt.
+                    # Do not even attach them to an exception in private mode.
+                    body = "" if self.private_transport else await response.text()
                     raise OpenRouterError(
                         response.status,
                         body,
@@ -550,6 +569,11 @@ class LLMClient:
                     return json.loads(await response.read())
             except OpenRouterError as exc:
                 last = exc
+                if self.private_transport:
+                    logger.warning("[LLMClient.private] status=%d attempt=%d", exc.status, attempt)
+                    if not exc.retryable:
+                        raise PrivateLLMError("provider_unavailable", exc.status) from None
+                    continue
                 if not exc.retryable:
                     logger.error("[LLMClient.%s] %d, not retryable: %s", what, exc.status, exc.body[:200])
                     raise
@@ -559,6 +583,9 @@ class LLMClient:
                 )
             except Exception as exc:
                 last = exc
+                if self.private_transport:
+                    logger.warning("[LLMClient.private] transport_failure attempt=%d", attempt)
+                    continue
                 logger.warning(
                     "[LLMClient.%s] error on attempt %d/%d: %s", what, attempt, attempts, exc
                 )
@@ -567,7 +594,81 @@ class LLMClient:
                     _retry_delay(attempt, getattr(last, "retry_after", None))
                 )
         assert last is not None
+        if self.private_transport:
+            raise PrivateLLMError("provider_unavailable", getattr(last, "status", None)) from None
         raise last
+
+    async def complete_private(
+        self,
+        messages: list[dict],
+        *,
+        schema: dict,
+        provider: dict,
+        max_tokens: int,
+        timeout_s: float = 90,
+    ) -> tuple[str, str | None, dict]:
+        """One structured, non-retried call; never writes the content corpus.
+
+        Reservation/retry decisions belong to the isolated caller's budget.
+        This opt-in path shares the ordinary client's single HTTP transport,
+        while recording only an allowlist of numeric billing metadata.
+        """
+        if not self.private_transport:
+            raise ValueError("complete_private requires private_transport=True")
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "max_tokens": max_tokens,
+            "stream": False,
+            "usage": {"include": True},
+            "provider": provider,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "pastoral_reply", "strict": True, "schema": schema},
+            },
+        }
+        started = time.monotonic()
+        status = "provider_unavailable"
+        billing = {}
+        try:
+            body = await self._post_json(
+                payload, timeout=aiohttp.ClientTimeout(total=timeout_s),
+                attempts=1, what="private",
+            )
+            if not isinstance(body, dict):
+                raise PrivateLLMError("invalid_provider_response")
+            usage = body.get("usage")
+            if isinstance(usage, dict):
+                billing = {
+                    k: usage[k] for k in ("cost", "prompt_tokens", "completion_tokens", "total_tokens")
+                    if isinstance(usage.get(k), (int, float)) and not isinstance(usage[k], bool)
+                }
+            choices = body.get("choices")
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                raise PrivateLLMError("invalid_provider_response")
+            choice = choices[0]
+            if choice.get("error"):
+                raise PrivateLLMError("provider_unavailable")
+            message = choice.get("message")
+            text = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(text, str):
+                raise PrivateLLMError("invalid_provider_response")
+            finish = choice.get("finish_reason")
+            finish = finish if isinstance(finish, str) and finish in {"stop", "length", "content_filter", "error"} else None
+            status = "ok"
+            return text, finish, billing
+        except PrivateLLMError:
+            raise
+        except Exception:
+            raise PrivateLLMError("invalid_provider_response") from None
+        finally:
+            logger.info(
+                "[LLMClient.private] status=%s duration_ms=%d input_tokens=%s output_tokens=%s cost=%s",
+                status, int((time.monotonic() - started) * 1000),
+                billing.get("prompt_tokens"), billing.get("completion_tokens"), billing.get("cost"),
+            )
 
     async def stream(
         self,
@@ -583,6 +684,8 @@ class LLMClient:
         :meth:`complete_with_tools` — no search path runs through the reply
         stream any more.
         """
+        if self.private_transport:
+            raise PrivateLLMError("use_complete_private")
         model = self.model
         built_messages = self._build_messages(messages, attachments, geo, system_prompt)
         logger.info(
@@ -718,6 +821,8 @@ class LLMClient:
         this model. The old default was a flat 650, which on a reasoning model
         is spent before the answer begins.
         """
+        if self.private_transport:
+            raise PrivateLLMError("use_complete_private")
         if max_tokens is None:
             from infrastructure.llm import budgets
 
@@ -796,6 +901,8 @@ class LLMClient:
         The timeout is generous by default — several searches plus a page fetch
         can take well over the 60s used by :meth:`complete`.
         """
+        if self.private_transport:
+            raise PrivateLLMError("use_complete_private")
         if max_tokens is None:
             from infrastructure.llm import budgets
 
@@ -883,6 +990,8 @@ class LLMClient:
         itself — a fifth hand-rolled path, with its own headers, its own timeout
         and no retries at all.
         """
+        if self.private_transport:
+            raise PrivateLLMError("use_complete_private")
         content: list | str = prompt
         if reference_png_b64:
             content = [
@@ -952,4 +1061,3 @@ class LLMClient:
             error="could not find image in response",
         )
         return None
-

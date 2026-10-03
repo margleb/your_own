@@ -1,0 +1,88 @@
+name: pastoral
+
+x-runtime: &runtime
+  image: ${PASTORAL_IMAGE:-pastoral-bot:local}
+  build:
+    context: ../..
+    dockerfile: pastoral_bot/deploy/Dockerfile
+  user: "10001:10001"
+  env_file:
+    - ${PASTORAL_ENV_FILE:?Set the absolute path to the isolated pastoral env file}
+  environment:
+    PASTORAL_DATABASE_URL: postgresql+asyncpg://pastoral:${PASTORAL_DATABASE_PASSWORD:?Set the isolated application database password}@db:5432/pastoral
+    PASTORAL_STATE_DIR: /var/lib/pastoral-bot
+    HF_HOME: /var/lib/pastoral-bot/huggingface
+  volumes:
+    - pastoral_state:/var/lib/pastoral-bot
+  read_only: true
+  tmpfs:
+    - /tmp:size=128m,mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+  mem_limit: 1200m
+  cpus: 1.0
+
+services:
+  db:
+    image: pgvector/pgvector:0.8.1-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pastoral
+      POSTGRES_USER: pastoral_admin
+      POSTGRES_PASSWORD: ${PASTORAL_POSTGRES_ADMIN_PASSWORD:?Set an isolated PostgreSQL admin password}
+      PASTORAL_DATABASE_PASSWORD: ${PASTORAL_DATABASE_PASSWORD:?Set the pastoral application database password}
+    ports:
+      - "127.0.0.1:5543:5432"
+    volumes:
+      - pastoral_pgdata:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/10-pastoral.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pastoral_admin -d pastoral"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    mem_limit: 256m
+    cpus: 0.5
+
+  bootstrap:
+    <<: *runtime
+    profiles: [ops]
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    entrypoint: ["sh", "-c"]
+    command:
+      - mkdir -p /var/lib/pastoral-bot/embedding-cache /var/lib/pastoral-bot/huggingface /var/lib/pastoral-bot/backups && chown -R 10001:10001 /var/lib/pastoral-bot && chmod 700 /var/lib/pastoral-bot
+
+  app:
+    <<: *runtime
+    restart: unless-stopped
+    command: [run]
+    stop_grace_period: 120s
+    depends_on:
+      db:
+        condition: service_healthy
+
+  ops:
+    <<: *runtime
+    profiles: [ops]
+    command: [doctor]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backups:
+    <<: *runtime
+    restart: unless-stopped
+    entrypoint: ["python", "-m", "pastoral_bot.backup_scheduler"]
+    mem_limit: 256m
+    cpus: 0.25
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pastoral_pgdata:
+  pastoral_state:

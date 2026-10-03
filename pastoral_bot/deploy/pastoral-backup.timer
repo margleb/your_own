@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily encrypted pastoral snapshots
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+Persistent=true
+Unit=pastoral-backup.service
+
+[Install]
+WantedBy=timers.target

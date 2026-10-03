@@ -1,0 +1,25 @@
+[Unit]
+Description=Independent Orthodox Telegram companion
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pastoral
+Group=pastoral
+WorkingDirectory=/opt/your_own
+EnvironmentFile=/etc/pastoral-bot.env
+ExecStart=/opt/your_own/.venv/bin/python -m pastoral_bot run
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+StateDirectory=pastoral-bot
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pastoral-bot
+
+[Install]
+WantedBy=multi-user.target

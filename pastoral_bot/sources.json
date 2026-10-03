@@ -1,0 +1,41 @@
+{
+  "format": 1,
+  "sources": [
+    {
+      "key": "new-testament-synodal",
+      "title": "Новый Завет",
+      "edition": "Русский Синодальный перевод; электронный текст Азбуки веры",
+      "canonical_url": "https://azbyka.ru/biblia/",
+      "fetch_url": "https://azbyka.ru/biblia/downloads/bibliya.fb2",
+      "parser": "nt_fb2",
+      "minimum_passages": 7900
+    },
+    {
+      "key": "filaret-catechism-2013",
+      "title": "Пространный христианский Катехизис святителя Филарета",
+      "edition": "Редакция 2013 года: современная орфография, уточнения и русские библейские цитаты в электронной публикации",
+      "canonical_url": "https://azbyka.ru/otechnik/Filaret_Moskovskij/prostrannyj-pravoslavnyj-katekhizis/",
+      "fetch_url": "https://azbyka.ru/otechnik/Filaret_Moskovskij/prostrannyj-pravoslavnyj-katekhizis/",
+      "parser": "catechism_html",
+      "minimum_passages": 580
+    },
+    {
+      "key": "social-concept",
+      "title": "Основы социальной концепции Русской Православной Церкви",
+      "edition": "Документ Архиерейского Собора 2000 года; публикация Патриархия.ру",
+      "canonical_url": "https://patriarchia.ru/article/105101",
+      "fetch_url": "https://sobor.patriarchia.ru/article/105101",
+      "parser": "social_html",
+      "minimum_passages": 100
+    },
+    {
+      "key": "eucharist-2015",
+      "title": "Об участии верных в Евхаристии",
+      "edition": "Документ Архиерейского Совещания 2015 года; публикация Санкт-Петербургской митрополии",
+      "canonical_url": "https://patriarchia.ru/document/96198",
+      "fetch_url": "https://mitropolia.spb.ru/docs/ob-uchastii-vernykh-v-evkharistii",
+      "parser": "eucharist_html",
+      "minimum_passages": 15
+    }
+  ]
+}

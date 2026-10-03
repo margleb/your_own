@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly backup retention, independently of backup success
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=pastoral-prune.service
+
+[Install]
+WantedBy=timers.target

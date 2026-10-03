@@ -1,0 +1,18 @@
+[Unit]
+Description=Encrypted pastoral PostgreSQL backup
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pastoral
+Group=pastoral
+WorkingDirectory=/opt/your_own
+EnvironmentFile=/etc/pastoral-bot.env
+ExecStart=/opt/your_own/.venv/bin/python -m pastoral_bot backup
+StateDirectory=pastoral-bot
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pastoral-bot

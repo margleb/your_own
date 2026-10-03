@@ -129,6 +129,36 @@ async def test_invalid_source_gets_exactly_one_repair_and_one_quota_slot(service
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("label", [
+    "eucharist-2015:2026-10-03:18", "filaret-catechism-2013:488",
+    "SOCIAL-CONCEPT : 229", "new-testament-synodal:56", SOURCE.source_id,
+])
+async def test_internal_source_label_repairs_before_public_reply_and_charges_both_calls(services, label):
+    turn, _, _, llm, budget = services
+    llm.outputs = [
+        Completion(response(text=f"Объяснение ({label})."), Decimal("0.001"), "stop"),
+        Completion(response(text="В Ин 3:16 говорится о любви Бога."), Decimal("0.002"), "stop"),
+    ]
+    reply = await turn.run(job(Mode.FAITH))
+    assert label not in reply.text
+    assert "Ин 3:16" in reply.text
+    assert SOURCE.url in reply.text
+    assert len(llm.calls) == 2
+    assert len(budget.reserved) == 1
+    assert budget.settled == [(1, Decimal("0.003"), True)]
+
+
+@pytest.mark.asyncio
+async def test_repeated_internal_labels_never_become_public_answer(services):
+    turn, _, _, llm, budget = services
+    llm.outputs = [Completion(response(text="Ответ (eucharist-2015:18)."), Decimal("0.001"), "stop")] * 2
+    with pytest.raises(TurnError, match="invalid_reply"):
+        await turn.run(job(Mode.FAITH))
+    assert len(llm.calls) == 2
+    assert budget.settled == [(1, Decimal("0.002"), False)]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("bad", [
     "not json", response(ids=["unknown"]), response(text="Источник https://evil.example"),
     '{"text":"ответ","source_ids":[],"referral":"absolution"}',

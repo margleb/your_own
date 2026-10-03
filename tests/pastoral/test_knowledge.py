@@ -72,6 +72,33 @@ async def test_new_version_deactivates_old_in_transaction(knowledge):
 
 
 @pytest.mark.asyncio
+async def test_new_source_revision_reuses_only_unchanged_public_text_vectors(knowledge):
+    class CountingEmbedding:
+        calls = []
+
+        async def embed_many(self, values):
+            self.calls.extend(values)
+            return [[1.0] + [0.0] * 383 for _ in values]
+
+    encoder = CountingEmbedding()
+    knowledge.embedder = encoder
+    first = synthetic_bundle()
+    await knowledge.import_documents(first, approve_hash=bundle_hash(first))
+    assert len(encoder.calls) == 15
+    revised = synthetic_bundle("v2")
+    revised["documents"][0]["passages"][0]["locator"] = "IV, абзац 1"
+    revised["documents"][0]["passages"][1]["text"] = "Новый публичный текст этой редакции."
+    await knowledge.import_documents(revised, approve_hash=bundle_hash(revised))
+    assert encoder.calls[15:] == ["Новый публичный текст этой редакции."]
+    async with knowledge.engine.connect() as conn:
+        vectors = (await conn.execute(select(knowledge.passages.c.embedding).where(
+            knowledge.passages.c.document_id == "eucharist-2015:v2",
+        ))).scalars().all()
+    assert len(vectors) == 15
+    assert all(vector == [1.0] + [0.0] * 383 for vector in vectors)
+
+
+@pytest.mark.asyncio
 async def test_wrong_approval_or_conflicting_version_never_changes_corpus(knowledge):
     bundle = synthetic_bundle()
     with pytest.raises(ValueError, match="approval_hash_mismatch"):
@@ -153,6 +180,32 @@ def test_document_parsers_require_known_content_and_keep_sections():
     assert all("Реклама" not in passage["text"] for passage in passages)
     with pytest.raises(SourceImportError, match="document_content_missing"):
         parse_document_html(b"<html>Navigation only</html>", parser="eucharist_html", canonical_url="https://example.org")
+
+
+def test_social_cyrillic_roman_chapter_cannot_inherit_previous_section():
+    # Mirrors the official page's Cyrillic Х in every family chapter label.
+    payload = '<main><div class="content"><p>IX.4. Предыдущая тема.</p><p><strong>Х. Семейная жизнь</strong></p><p>Х.3. Верность супругов.</p><p>Продолжение о верности.</p><p>Х.4. Семья и Церковь.</p><p>Семья как домашняя церковь.</p><p>XI. Здоровье личности</p><p>XI.1. Следующая тема.</p></div></main>'.encode()
+    passages = parse_document_html(payload, parser="social_html", canonical_url="https://example.org")
+    by_text = {p["text"]: p["locator"] for p in passages}
+    assert by_text["Х.3. Верность супругов."] == "X.3, абзац 1"
+    assert by_text["Продолжение о верности."] == "X.3, абзац 2"
+    assert by_text["Семья как домашняя церковь."] == "X.4, абзац 2"
+    assert by_text["XI.1. Следующая тема."] == "XI.1, абзац 1"
+    assert "Х. Семейная жизнь" in by_text  # source text itself is not rewritten
+
+
+def test_eucharist_standalone_roman_headings_reset_body_paragraphs():
+    payload = '<div class="detail_text"><p>Вводный текст.</p><h2>I.</h2><p>Начало раздела один.</p><p>Продолжение первого раздела.</p><h2>II.</h2><p>Начало раздела два.</p><h2>III.</h2><p>Готовящийся ко святому причащению.</p><p>Продолжение о покаянии.</p></div>'.encode()
+    passages = parse_document_html(payload, parser="eucharist_html", canonical_url="https://example.org")
+    by_text = {p["text"]: p["locator"] for p in passages}
+    assert by_text["Вводный текст."] == "Введение, абзац 1"
+    assert by_text["I."] == "Раздел I"
+    assert by_text["Начало раздела один."] == "I, абзац 1"
+    assert by_text["Продолжение первого раздела."] == "I, абзац 2"
+    assert by_text["Начало раздела два."] == "II, абзац 1"
+    assert by_text["Готовящийся ко святому причащению."] == "III, абзац 1"
+    assert by_text["Продолжение о покаянии."] == "III, абзац 2"
+    assert len(passages) == 9
 
 
 def test_safe_embedder_has_no_legacy_import_or_error_logging(tmp_path, caplog):

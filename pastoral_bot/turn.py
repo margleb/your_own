@@ -33,6 +33,15 @@ def _validate_reply(raw: str, sources: list[SourcePassage], mode: Mode) -> TurnR
         raise TurnError("invalid_reply")
     if re.search(r"(?:https?://|www\.|t\.me/)", text, re.IGNORECASE):
         raise TurnError("invalid_reply")
+    # Providers sometimes copy internal source labels into otherwise valid JSON.
+    # Include all corpus keys even if a hallucinated label was not retrieved;
+    # include adapter/test source prefixes too, without rejecting Bible locators.
+    source_keys = {
+        "new-testament-synodal", "filaret-catechism-2013", "social-concept", "eucharist-2015",
+        *(source.source_id.split(":", 1)[0] for source in sources if ":" in source.source_id),
+    }
+    if re.search(r"(?<![\w-])(?:" + "|".join(re.escape(key) for key in source_keys) + r")\s*:", text, re.IGNORECASE):
+        raise TurnError("invalid_reply")
     if not isinstance(ids, list) or len(ids) > 6 or any(not isinstance(i, str) for i in ids):
         raise TurnError("invalid_reply")
     allowed = {source.source_id for source in sources}

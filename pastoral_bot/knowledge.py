@@ -130,6 +130,26 @@ class Knowledge:
                 raise KnowledgeUnavailable("knowledge_empty")
             vector = await self.embed(value)
             async with self.engine.connect() as conn:
+                bible_range = _bible_range(value)
+                if bible_range:
+                    book, chapter, start, end = bible_range
+                    locators = [f"{book} {chapter}:{verse}" for verse in range(start, end + 1)]
+                    range_rows = (await conn.execute(self._base_query().where(
+                        self.documents.c.source_key == "new-testament-synodal",
+                        self.passages.c.locator.in_(locators),
+                    ))).mappings().all()
+                    # A complete passage is more useful than scattered verses
+                    # for a named parable or an explicitly requested range.
+                    by_locator = {row["locator"]: row for row in range_rows}
+                    if all(locator in by_locator for locator in locators):
+                        ordered = [by_locator[locator] for locator in locators]
+                        first = ordered[0]
+                        url = re.sub(r":\d+(?=&|$)", f":{start}-{end}", first["url"])
+                        return [SourcePassage(
+                            first["id"] + f":range:{start}-{end}", first["title"], first["edition"],
+                            f"{book} {chapter}:{start}\u2013{end}", url,
+                            "\n".join(f"{row['locator']} {row['text']}" for row in ordered),
+                        )]
                 reference = _bible_reference(value)
                 exact = []
                 if reference:
@@ -208,15 +228,26 @@ class Knowledge:
             passages = document["passages"]
             embeddings = [None] * len(passages)
             if f"{document['source_key']}:{bundle['version']}" not in existing_ids:
-                for start in range(0, len(passages), 64):
-                    batch = [p["text"] for p in passages[start:start + 64]]
+                # Reuse vectors only for identical public source text. Locator
+                # corrections do not require encoding the entire corpus again.
+                async with self.engine.connect() as conn:
+                    previous = (await conn.execute(select(self.passages.c.text, self.passages.c.embedding).select_from(
+                        self.passages.join(self.documents)
+                    ).where(self.documents.c.source_key == document["source_key"], self.passages.c.embedding.is_not(None)))).all()
+                cached = {value: vector for value, vector in previous}
+                embeddings = [cached.get(p["text"]) for p in passages]
+                missing = [number for number, vector in enumerate(embeddings) if vector is None]
+                for start in range(0, len(missing), 64):
+                    indices = missing[start:start + 64]
+                    batch = [passages[number]["text"] for number in indices]
                     if hasattr(self.embedder, "embed_many"):
                         vectors = await self.embedder.embed_many(batch)
                     else:
                         vectors = [await self.embed(value) for value in batch]
                     if len(vectors) != len(batch):
                         raise ValueError("invalid_embedding_batch")
-                    embeddings[start:start + len(batch)] = vectors
+                    for number, vector in zip(indices, vectors):
+                        embeddings[number] = vector
             prepared.append((document, embeddings))
         async with self.engine.begin() as conn:
             for document, embeddings in prepared:
@@ -262,6 +293,30 @@ def _bible_reference(value: str) -> str | None:
     if short not in names:
         return None
     return f"{names[short]} {int(match[2])}:{int(match[3])}"
+
+
+def _bible_range(value: str) -> tuple[str, int, int, int] | None:
+    """Resolve bounded verse ranges and common names absent from verse text."""
+    match = re.search(r"\b((?:[123]\s*)?(?:Мф|Мк|Лк|Ин|Деян|Иак|Пет|Иуд|Рим|Кор|Гал|Еф|Флп|Кол|Фес|Тим|Тит|Флм|Евр|Откр))\.?\s*(\d+)\s*:\s*(\d+)\s*[-\u2013\u2014]\s*(\d+)", value, re.IGNORECASE)
+    if match:
+        reference = _bible_reference(match[0])
+        start, end = int(match[3]), int(match[4])
+        if reference and 0 < start <= end and end - start < 40:
+            book, address = reference.rsplit(" ", 1)
+            return book, int(address.split(":")[0]), start, end
+        return None
+    if _bible_reference(value):
+        return None  # Explicit verse addresses take priority over topic names.
+    topics = (
+        (r"\bблудн[а-яё]*\s+сын[а-яё]*\b", ("Лк", 15, 11, 32)),
+        (r"\bотче\s+наш\b", ("Мф", 6, 9, 13)),
+        (r"\bмилосердн[а-яё]*\s+самарян[а-яё]*\b", ("Лк", 10, 25, 37)),
+        (r"\b(?:мол[а-яё]*\s+вместе|совместн[а-яё]*\s+молитв[а-яё]*|соборн[а-яё]*\s+молитв[а-яё]*)\b", ("Мф", 18, 19, 20)),
+    )
+    for pattern, address in topics:
+        if re.search(pattern, value, re.IGNORECASE):
+            return address
+    return None
 
 
 def _cosine(left, right) -> float:

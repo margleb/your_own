@@ -236,14 +236,22 @@ def parse_document_html(payload: bytes, *, parser: str, canonical_url: str) -> l
         content = _clean(node.get_text(" ", strip=True))
         if not content:
             continue
-        match = re.match(r"^([IVX]+\.\d+\.)\s*", content)
-        heading = re.match(r"^([IVX]+\.)\s+", content)
-        if match:
-            section = match[1].rstrip(".")
+        # The official Social Concept uses Cyrillic Х for chapter X (and its
+        # subsections); the Eucharist page uses standalone <h2>III.</h2>.
+        # Normalize only the numeric label, never the source's body text.
+        label = re.match(r"^([IVXХІ]+)\s*\.\s*(?:(\d+)\s*\.)?(?=\s|$)", content)
+        roman = label[1].translate(str.maketrans({"Х": "X", "І": "I"})) if label else ""
+        if roman not in {"I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI"}:
+            label = None
+        if label and label[2]:
+            section = f"{roman}.{int(label[2])}"
             paragraph = 0
-        elif heading and len(content) < 250:
-            section = content
+        elif label and len(content) < 250:
+            suffix = content[label.end():].strip()
+            section = roman
             paragraph = 0
+            _append(result, f"Раздел {roman}" + (f". {suffix}" if suffix else ""), content, canonical_url)
+            continue
         paragraph += 1
         _append(result, f"{section}, абзац {paragraph}", content, canonical_url)
     if not result:

@@ -1,13 +1,12 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   base: './',
   plugins: [react()],
-  test: {
-    environment: 'jsdom',
-    setupFiles: './src/test/setup.ts',
-    restoreMocks: true,
-    clearMocks: true,
+  build: {
+    // Rollup's call-argument tree shaker expands this hook graph past the VPS
+    // memory limit. Keep minification and skip that optional optimization.
+    rollupOptions: { treeshake: false },
   },
 });

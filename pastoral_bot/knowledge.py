@@ -322,6 +322,10 @@ def _bible_range(value: str) -> tuple[str, int, int, int] | None:
         return None
     if _bible_reference(value):
         return None  # Explicit verse addresses take priority over topic names.
+    if re.search(r"\bпрощать\b", value, re.IGNORECASE) and re.search(
+        r"\b(?:человек[а-яё]*|люд[а-яё]*)\b", value, re.IGNORECASE,
+    ):
+        return "Мф", 6, 12, 15
     topics = (
         (r"\bблудн[а-яё]*\s+сын[а-яё]*\b", ("Лк", 15, 11, 32)),
         (r"\bотче\s+наш\b", ("Мф", 6, 9, 13)),
@@ -346,6 +350,10 @@ def _document_topic(value: str) -> tuple[str, tuple[str, ...]] | None:
             "II, абзац 1", "II, абзац 2", "II, абзац 5", "II, абзац 11",
             "III, абзац 1", "III, абзац 2",
         )
+    if re.search(r"\b(?:зачем|для\s+чего)\b", value, re.IGNORECASE) and re.search(
+        r"\b(?:исповед[а-яё]*|покаяни[а-яё]*)\b", value, re.IGNORECASE,
+    ):
+        return "filaret-catechism-2013", ("Вопрос 348", "Вопрос 349", "Вопрос 350", "Вопрос 351")
     return None
 
 

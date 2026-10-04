@@ -79,3 +79,29 @@ async def test_do_not_judge_uses_its_complete_approved_context(corpus):
     assert "old" not in sources[0].text
     explicit = await corpus.search("Объясни «не судите» в Мф 7:3")
     assert explicit[0].source_id == "approved:mt7:3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("question", ["Нужно ли прощать человека, который не просит прощения?", "Почему нужно прощать людям?"])
+async def test_forgiving_people_returns_complete_prayer_context_not_isolated_sadness_verse(corpus, question):
+    async with corpus.engine.begin() as conn:
+        for edition in ("approved", "old"):
+            await conn.execute(insert(corpus.passages), [dict(
+                id=f"{edition}:mt6:{verse}", document_id=edition, ordinal=100 + verse,
+                locator=f"Мф 6:{verse}", text=f"{edition} Прощение и молитва, стих {verse}.",
+                url=f"https://azbyka.ru/biblia/?Mt.6:{verse}&r",
+            ) for verse in range(12, 16)])
+        await conn.execute(insert(corpus.passages).values(
+            id="approved:cor2:7", document_id="approved", ordinal=200,
+            locator="2 Кор 2:7", text="Простить человека, дабы он не был поглощен чрезмерною печалью.",
+            url="https://azbyka.ru/biblia/?2Cor.2:7&r",
+        ))
+    sources = await corpus.search(question)
+    assert len(sources) == 1
+    assert sources[0].locator == "Мф 6:12–15"
+    assert sources[0].url == "https://azbyka.ru/biblia/?Mt.6:12-15&r"
+    assert len(sources[0].text.splitlines()) == 4
+    assert "old" not in sources[0].text
+    assert "печаль" not in sources[0].text
+    explicit = await corpus.search("Нужно ли прощать человека? Объясни 2 Кор 2:7")
+    assert explicit[0].source_id == "approved:cor2:7"

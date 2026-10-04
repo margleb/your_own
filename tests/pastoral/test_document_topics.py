@@ -52,6 +52,22 @@ async def corpus():
             id="nt:16", document_id="nt", ordinal=1, locator="Ин 3:16",
             text="Ибо так возлюбил Бог мир.", url="https://azbyka.ru/biblia/?Jn.3:16&r",
         ))
+        for edition, approved in [("catechism-reviewed", True), ("catechism-retired", False)]:
+            await conn.execute(insert(knowledge.documents).values(
+                id=edition, source_key="filaret-catechism-2013", title="Катехизис святителя Филарета",
+                edition=edition, canonical_url="https://azbyka.ru/otechnik/Filaret_Moskovskij/",
+                version=edition, content_hash="0" * 64, approved=approved,
+            ))
+            await conn.execute(insert(knowledge.passages), [dict(
+                id=f"{edition}:{number}", document_id=edition, ordinal=number,
+                locator=f"Вопрос {number}", text=f"{edition} {content}",
+                url="https://azbyka.ru/otechnik/Filaret_Moskovskij/prostrannyj-pravoslavnyj-katekhizis/2#2_22",
+            ) for number, content in zip(range(348, 352), (
+                "Покаяние есть Таинство, в котором кающийся невидимо освобождается от грехов Господом Иисусом Христом.",
+                "Апостолам Иисус Христос обещал власть прощать грехи.",
+                "От кающегося требуется сокрушение о грехах, намерение исправить жизнь, вера в Христа и надежда на милосердие.",
+                "Подготовительные и вспомогательные средства для покаяния — пост и молитва.",
+            ))])
     yield knowledge
     await engine.dispose()
 
@@ -89,3 +105,29 @@ async def test_missing_approved_requirement_is_not_filled_from_retired_edition(c
 async def test_unrelated_preparation_question_keeps_general_retrieval(corpus):
     sources = await corpus.search("Как подготовиться к собеседованию?")
     assert tuple(p.locator for p in sources) != LOCATORS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("question", ["Зачем христианину исповедь?", "Для чего нужно покаяние?", "Для чего исповедоваться?"])
+async def test_confession_purpose_returns_approved_catechism_not_incidental_age_rules(corpus, question):
+    sources = await corpus.search(question)
+    assert tuple(p.locator for p in sources) == tuple(f"Вопрос {n}" for n in range(348, 352))
+    assert [p.source_id for p in sources] == [f"catechism-reviewed:{n}" for n in range(348, 352)]
+    assert all(p.edition == "catechism-reviewed" for p in sources)
+    assert all("eucharist" not in p.source_id and "nt:" not in p.source_id for p in sources)
+    assert "исправить жизнь" in sources[2].text
+
+
+@pytest.mark.asyncio
+async def test_explicit_verse_wins_over_confession_purpose(corpus):
+    sources = await corpus.search("Зачем исповедь? Объясни Ин 3:16")
+    assert sources[0].source_id == "nt:16"
+
+
+@pytest.mark.asyncio
+async def test_confession_topic_never_fills_missing_question_from_retired_edition(corpus):
+    async with corpus.engine.begin() as conn:
+        await conn.execute(corpus.passages.delete().where(corpus.passages.c.id == "catechism-reviewed:350"))
+    sources = await corpus.search("Для чего нужно покаяние?")
+    assert all(p.edition != "catechism-retired" for p in sources)
+    assert all(p.locator != "Вопрос 350" for p in sources)

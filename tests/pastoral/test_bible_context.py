@@ -60,3 +60,22 @@ async def test_incomplete_range_is_not_presented_as_complete(corpus):
         await conn.execute(corpus.passages.delete().where(corpus.passages.c.id == "approved:20"))
     passages = await corpus.search("Объясни притчу о блудном сыне")
     assert all("range:" not in p.source_id for p in passages)
+
+
+@pytest.mark.asyncio
+async def test_do_not_judge_uses_its_complete_approved_context(corpus):
+    async with corpus.engine.begin() as conn:
+        for edition in ("approved", "old"):
+            await conn.execute(insert(corpus.passages), [dict(
+                id=f"{edition}:mt7:{verse}", document_id=edition, ordinal=verse,
+                locator=f"Мф 7:{verse}", text=f"{edition} Не судите, контекст стиха {verse}.",
+                url=f"https://azbyka.ru/biblia/?Mt.7:{verse}&r",
+            ) for verse in range(1, 6)])
+    sources = await corpus.search("Что означает заповедь «не судите»?")
+    assert len(sources) == 1
+    assert sources[0].locator == "Мф 7:1–5"
+    assert sources[0].url == "https://azbyka.ru/biblia/?Mt.7:1-5&r"
+    assert len(sources[0].text.splitlines()) == 5
+    assert "old" not in sources[0].text
+    explicit = await corpus.search("Объясни «не судите» в Мф 7:3")
+    assert explicit[0].source_id == "approved:mt7:3"

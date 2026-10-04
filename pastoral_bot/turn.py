@@ -7,6 +7,7 @@ import re
 from decimal import Decimal
 
 from pastoral_bot.llm import LLMUnavailable, PastoralLLM
+from pastoral_bot.guardrails import service_reply
 from pastoral_bot.policy import ERROR_MESSAGES, REPAIR_INSTRUCTION, system_prompt
 from pastoral_bot.types import Mode, SourcePassage, TurnJob, TurnReply
 
@@ -104,6 +105,10 @@ class PastoralTurn:
         await self._check_current(job)
         if not job.text.strip() or len(job.text) > self.settings.max_message_chars:
             raise TurnError("input_too_long")
+        factual_reply = service_reply(job.text, job.mode, self.settings)
+        if factual_reply is not None:
+            await self._check_current(job)
+            return factual_reply
         try:
             sources = list(await self.knowledge.search(job.text))[:6]
         except Exception:

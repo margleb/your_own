@@ -150,6 +150,21 @@ class Knowledge:
                             f"{book} {chapter}:{start}\u2013{end}", url,
                             "\n".join(f"{row['locator']} {row['text']}" for row in ordered),
                         )]
+                document_topic = _document_topic(value)
+                if document_topic:
+                    source_key, locators = document_topic
+                    topic_rows = (await conn.execute(self._base_query().where(
+                        self.documents.c.source_key == source_key,
+                        self.passages.c.locator.in_(locators),
+                    ))).mappings().all()
+                    by_locator = {row["locator"]: row for row in topic_rows}
+                    # These approved paragraphs together retain requirements,
+                    # pastoral adaptation and exceptions. Do not substitute
+                    # older editions or unrelated semantic matches for a gap.
+                    if all(locator in by_locator for locator in locators):
+                        return [SourcePassage(
+                            row["id"], row["title"], row["edition"], row["locator"], row["url"], row["text"],
+                        ) for row in (by_locator[locator] for locator in locators[:min(6, self.limit)])]
                 reference = _bible_reference(value)
                 exact = []
                 if reference:
@@ -310,12 +325,27 @@ def _bible_range(value: str) -> tuple[str, int, int, int] | None:
     topics = (
         (r"\bблудн[а-яё]*\s+сын[а-яё]*\b", ("Лк", 15, 11, 32)),
         (r"\bотче\s+наш\b", ("Мф", 6, 9, 13)),
+        (r"\bне\s+судите\b", ("Мф", 7, 1, 5)),
         (r"\bмилосердн[а-яё]*\s+самарян[а-яё]*\b", ("Лк", 10, 25, 37)),
         (r"\b(?:мол[а-яё]*\s+вместе|совместн[а-яё]*\s+молитв[а-яё]*|соборн[а-яё]*\s+молитв[а-яё]*)\b", ("Мф", 18, 19, 20)),
     )
     for pattern, address in topics:
         if re.search(pattern, value, re.IGNORECASE):
             return address
+    return None
+
+
+def _document_topic(value: str) -> tuple[str, tuple[str, ...]] | None:
+    """Operator-selected source locations for a narrow preparation question."""
+    if _bible_reference(value):
+        return None
+    if re.search(r"\bподгот[а-яё]*\b", value, re.IGNORECASE) and re.search(
+        r"\b(?:причаст[а-яё]*|причащ[а-яё]*|евхарист[а-яё]*)\b", value, re.IGNORECASE,
+    ):
+        return "eucharist-2015", (
+            "II, абзац 1", "II, абзац 2", "II, абзац 5", "II, абзац 11",
+            "III, абзац 1", "III, абзац 2",
+        )
     return None
 
 

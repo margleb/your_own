@@ -12,7 +12,7 @@ from uuid import uuid4
 from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, JSON, MetaData,
     Numeric, String, Table, Text, delete, func, insert, select,
-    text as sql_text, update,
+    inspect, text as sql_text, update,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -73,6 +73,7 @@ messages = Table(
     Column("content", Text, nullable=False),
     Column("reply_to_id", Integer, ForeignKey("pastoral_messages.id", ondelete="CASCADE")),
     Column("created_at", DateTime, nullable=False),
+    Column("reply_metadata", JSON),
 )
 chunks = Table(
     "pastoral_dialogue_chunks", metadata,
@@ -101,6 +102,9 @@ jobs = Table(
     Column("status", String(24), nullable=False),
     Column("created_at", DateTime, nullable=False),
     Column("delivered_chunks", Integer, nullable=False, default=0),
+    Column("channel", String(16), nullable=False, server_default="telegram"),
+    Column("request_id", String(36)),
+    Column("error_code", String(32)),
 )
 deletions = Table(
     "pastoral_deletion_events", metadata,
@@ -159,6 +163,17 @@ class Store:
             elif conn.dialect.name == "sqlite":
                 await conn.execute(sql_text("PRAGMA foreign_keys=ON"))
             await conn.run_sync(metadata.create_all)
+            # Additive migration: old releases remain readable and existing
+            # conversations retain their original Telegram delivery channel.
+            for table, additions in (
+                ("pastoral_messages", {"reply_metadata": "JSON"}),
+                ("pastoral_jobs", {"channel": "VARCHAR(16) NOT NULL DEFAULT 'telegram'",
+                                   "request_id": "VARCHAR(36)", "error_code": "VARCHAR(32)"}),
+            ):
+                existing = await conn.run_sync(lambda sync, name=table: {c["name"] for c in inspect(sync).get_columns(name)})
+                for column, kind in additions.items():
+                    if column not in existing:
+                        await conn.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN {column} {kind}"))
 
     async def close(self):
         await self.engine.dispose()
@@ -183,29 +198,31 @@ class Store:
         async with self.lock, self.engine.begin() as conn:
             return await insert_once(conn, receipts, dict(update_id=update_id, status="control", created_at=utcnow()), ["update_id"])
 
-    async def accept_message(self, update_id: int, user_id: int, chat_id: int, text: str) -> TurnJob | None:
+    async def accept_message(self, update_id: int, user_id: int, chat_id: int, text: str, *, channel: str = "telegram", request_id: str | None = None, expected_epoch: int | None = None) -> TurnJob | None:
         async with self.lock, self.engine.begin() as conn:
+            state = self._state(await self._user(conn, user_id))
+            if expected_epoch is not None and state.epoch != expected_epoch:
+                return None
             if not await insert_once(conn, receipts, dict(update_id=update_id, status="accepted", created_at=utcnow()), ["update_id"]):
                 return None
-            state = self._state(await self._user(conn, user_id))
             await conn.execute(update(users).where(users.c.user_id == user_id).values(last_seen_at=utcnow()))
             message_id = None
             if state.mode != Mode.CONFESSION:
                 result = await conn.execute(insert(messages).values(user_id=user_id, conversation_id=state.conversation_id, role="user", content=text, created_at=utcnow()))
                 message_id = result.inserted_primary_key[0]
-                await conn.execute(insert(jobs).values(update_id=update_id, user_id=user_id, chat_id=chat_id, conversation_id=state.conversation_id, epoch=state.epoch, mode=state.mode.value, message_id=message_id, status="pending", created_at=utcnow(), delivered_chunks=0))
-            return TurnJob(update_id=update_id, user_id=user_id, chat_id=chat_id, conversation_id=state.conversation_id, epoch=state.epoch, mode=state.mode, text=text, message_id=message_id)
+                await conn.execute(insert(jobs).values(update_id=update_id, user_id=user_id, chat_id=chat_id, conversation_id=state.conversation_id, epoch=state.epoch, mode=state.mode.value, message_id=message_id, status="pending", created_at=utcnow(), delivered_chunks=0, channel=channel, request_id=request_id))
+            return TurnJob(update_id=update_id, user_id=user_id, chat_id=chat_id, conversation_id=state.conversation_id, epoch=state.epoch, mode=state.mode, text=text, message_id=message_id, channel=channel, request_id=request_id)
 
     async def next_offset(self) -> int | None:
         async with self.engine.connect() as conn:
-            value = await conn.scalar(select(func.max(receipts.c.update_id)))
+            value = await conn.scalar(select(func.max(receipts.c.update_id)).where(receipts.c.update_id >= 0))
             return value + 1 if value is not None else None
 
     async def pending_jobs(self) -> list[TurnJob]:
         async with self.engine.connect() as conn:
-            query = select(jobs, messages.c.content).join(messages, jobs.c.message_id == messages.c.id).where(jobs.c.status.in_(["pending", "running"])).order_by(jobs.c.update_id)
+            query = select(jobs, messages.c.content).join(messages, jobs.c.message_id == messages.c.id).where(jobs.c.status.in_(["pending", "running"])).order_by(jobs.c.created_at, messages.c.id)
             rows = (await conn.execute(query)).mappings().all()
-            return [TurnJob(update_id=r["update_id"], user_id=r["user_id"], chat_id=r["chat_id"], conversation_id=r["conversation_id"], epoch=r["epoch"], mode=Mode(r["mode"]), text=r["content"], message_id=r["message_id"]) for r in rows]
+            return [TurnJob(update_id=r["update_id"], user_id=r["user_id"], chat_id=r["chat_id"], conversation_id=r["conversation_id"], epoch=r["epoch"], mode=Mode(r["mode"]), text=r["content"], message_id=r["message_id"], channel=r["channel"], request_id=r["request_id"]) for r in rows]
 
     async def _change(self, conn, user_id: int, mode: Mode | None = None, new: bool = True) -> UserState:
         row = await self._user(conn, user_id)
@@ -246,6 +263,19 @@ class Store:
     async def stop(self, user_id: int) -> UserState:
         async with self.lock, self.engine.begin() as conn:
             return await self._change(conn, user_id, new=False)
+
+    async def web_transition(self, user_id: int, expected_epoch: int, action: str, mode: Mode | None = None) -> UserState | None:
+        async with self.lock, self.engine.begin() as conn:
+            row = await self._user(conn, user_id)
+            if row["epoch"] != expected_epoch:
+                return None
+            if action == "delete":
+                return await self._delete_history(conn, user_id)
+            if action == "mode":
+                if mode is None:
+                    raise ValueError("Mode required")
+                await asyncio.to_thread(self._append_record, self.mode_journal, {"user_id": user_id, "mode": mode.value})
+            return await self._change(conn, user_id, mode=mode, new=action != "stop")
 
     @staticmethod
     def _append_record(path, event):
@@ -350,7 +380,7 @@ class Store:
                 result.extend(dict(role=r["role"], content=r["content"]) for r in pair)
             return result
 
-    async def complete(self, job: TurnJob, text: str, vector=None) -> bool:
+    async def complete(self, job: TurnJob, text: str, vector=None, *, reply_metadata: dict | None = None) -> bool:
         async with self.lock, self.engine.begin() as conn:
             row = (await conn.execute(select(users).where(users.c.user_id == job.user_id).with_for_update())).mappings().one_or_none()
             if not self._matches(row, job):
@@ -363,7 +393,7 @@ class Store:
             if not saved or saved["status"] not in ("pending", "running") or saved["epoch"] != job.epoch or saved["conversation_id"] != job.conversation_id:
                 return False
             await self._mark_answer(conn, row, now)
-            result = await conn.execute(insert(messages).values(user_id=job.user_id, conversation_id=job.conversation_id, role="assistant", content=text, reply_to_id=saved["message_id"], created_at=utcnow()))
+            result = await conn.execute(insert(messages).values(user_id=job.user_id, conversation_id=job.conversation_id, role="assistant", content=text, reply_to_id=saved["message_id"], created_at=utcnow(), reply_metadata=reply_metadata))
             assistant_id = result.inserted_primary_key[0]
             if vector is not None:
                 await conn.execute(insert(chunks).values(user_id=job.user_id, conversation_id=job.conversation_id, user_message_id=saved["message_id"], assistant_message_id=assistant_id, embedding=list(vector)))
@@ -374,9 +404,9 @@ class Store:
     async def _mark_answer(conn, row, now):
         await conn.execute(update(users).where(users.c.user_id == row["user_id"]).values(first_answer_at=row["first_answer_at"] or now, last_answer_at=now, returned=row["returned"] or bool(row["first_answer_at"] and now.date() > row["first_answer_at"].date())))
 
-    async def finish_job(self, update_id: int, status: str):
+    async def finish_job(self, update_id: int, status: str, *, error_code: str | None = None):
         async with self.lock, self.engine.begin() as conn:
-            await conn.execute(update(jobs).where(jobs.c.update_id == update_id).values(status=status))
+            await conn.execute(update(jobs).where(jobs.c.update_id == update_id).values(status=status, error_code=error_code))
             await conn.execute(update(receipts).where(receipts.c.update_id == update_id).values(status=status))
 
     async def record_delivery(self, update_id: int, delivered_chunks: int):
@@ -397,9 +427,31 @@ class Store:
         incoming = messages.alias("incoming")
         outgoing = messages.alias("outgoing")
         async with self.engine.connect() as conn:
-            query = select(jobs, incoming.c.content.label("incoming_text"), outgoing.c.content.label("reply_text")).join(incoming, jobs.c.message_id == incoming.c.id).join(outgoing, outgoing.c.reply_to_id == incoming.c.id).where(jobs.c.status == "generated", outgoing.c.user_id == jobs.c.user_id).order_by(jobs.c.update_id)
+            query = select(jobs, incoming.c.content.label("incoming_text"), outgoing.c.content.label("reply_text")).join(incoming, jobs.c.message_id == incoming.c.id).join(outgoing, outgoing.c.reply_to_id == incoming.c.id).where(jobs.c.status == "generated", jobs.c.channel == "telegram", outgoing.c.user_id == jobs.c.user_id).order_by(jobs.c.update_id)
             rows = (await conn.execute(query)).mappings().all()
             return [(TurnJob(update_id=r["update_id"], user_id=r["user_id"], chat_id=r["chat_id"], conversation_id=r["conversation_id"], epoch=r["epoch"], mode=Mode(r["mode"]), text=r["incoming_text"], message_id=r["message_id"]), r["reply_text"], r["delivered_chunks"]) for r in rows]
+
+    async def web_history(self, user_id: int, conversation_id: str) -> list[dict]:
+        async with self.engine.connect() as conn:
+            rows = (await conn.execute(select(messages).where(messages.c.user_id == user_id, messages.c.conversation_id == conversation_id).order_by(messages.c.id.desc()).limit(100))).mappings().all()
+            return [{"id": str(r["id"]), "role": r["role"], "text": (r["reply_metadata"] or {}).get("text", r["content"]), "sources": (r["reply_metadata"] or {}).get("sources", [])} for r in reversed(rows)]
+
+    async def web_result(self, user_id: int, request_id: str, epoch: int) -> dict | None:
+        async with self.engine.connect() as conn:
+            row = (await conn.execute(select(jobs).where(jobs.c.channel == "web", jobs.c.user_id == user_id, jobs.c.request_id == request_id, jobs.c.epoch == epoch))).mappings().one_or_none()
+            if row is None:
+                return None
+            result = {"request_id": request_id, "epoch": epoch, "status": row["status"], "error_code": row["error_code"]}
+            if row["status"] in ("generated", "done"):
+                answer = (await conn.execute(select(messages.c.reply_metadata, messages.c.content).where(messages.c.user_id == user_id, messages.c.reply_to_id == row["message_id"], messages.c.role == "assistant"))).mappings().one_or_none()
+                if answer:
+                    result["reply"] = answer["reply_metadata"] or {"text": answer["content"], "sources": [], "referral": None}
+                    result["status"] = "done"
+            return result
+
+    async def receipt_status(self, update_id: int) -> str | None:
+        async with self.engine.connect() as conn:
+            return await conn.scalar(select(receipts.c.status).where(receipts.c.update_id == update_id))
 
     async def attribute(self, user_id: int, campaign: str):
         if not campaign or len(campaign) > 64 or not all(c.isascii() and (c.isalnum() or c in "_-") for c in campaign):

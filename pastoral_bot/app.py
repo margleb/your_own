@@ -6,6 +6,9 @@ import logging
 import re
 import time
 from contextlib import suppress
+from dataclasses import asdict
+from hashlib import sha256
+from weakref import WeakValueDictionary
 
 from infrastructure.telegram.client import TelegramError
 from pastoral_bot.temporary import TemporarySessions
@@ -73,10 +76,34 @@ class BotApp:
         self.queues: dict[int, asyncio.Queue] = {}
         self.workers: dict[int, asyncio.Task] = {}
         self.active: dict[int, asyncio.Task] = {}
+        self.acquiring: dict[int, asyncio.Task] = {}
         self.arrivals: dict[int, float] = {}
+        self.queued_ids: set[int] = set()
+        self.user_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
+        # Only confession results live here; ordinary replies are owned rows in SQL.
+        self.web_requests: dict[tuple[int, str], dict] = {}
         self.closed = False
 
+    def user_lock(self, user_id: int) -> asyncio.Lock:
+        lock = self.user_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.user_locks[user_id] = lock
+        return lock
+
     async def handle(self, update: dict) -> None:
+        callback = update.get("callback_query") or {}
+        message = callback.get("message") if callback else update.get("message")
+        author = callback.get("from") if callback else (message or {}).get("from")
+        user_id = (author or {}).get("id")
+        chat = (message or {}).get("chat") or {}
+        if type(user_id) is int and user_id > 0 and chat.get("type") == "private" and chat.get("id") == user_id:
+            async with self.user_lock(user_id):
+                await self._handle_update(update)
+        else:
+            await self._handle_update(update)
+
+    async def _handle_update(self, update: dict) -> None:
         update_id = update.get("update_id")
         if not isinstance(update_id, int):
             return
@@ -123,7 +150,10 @@ class BotApp:
             if campaign in self.settings.campaign_ids and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", campaign):
                 await self.store.attribute(user_id, campaign)
             state = await self.store.get_user(user_id)
-            await self.sender.text(user_id, INTRO, keyboard=mode_keyboard(state))
+            keyboard = mode_keyboard(state)
+            if self.settings.web_enabled:
+                keyboard["inline_keyboard"].insert(0, [{"text": "Открыть приложение", "web_app": {"url": self.settings.web_public_url}}])
+            await self.sender.text(user_id, INTRO, keyboard=keyboard)
         elif command in ("/mode", "/help"):
             state = await self.store.get_user(user_id)
             await self.sender.text(user_id, HELP.replace("До 10 ответов", f"До {self.settings.daily_answer_limit} ответов") if command == "/help" else "Выберите режим:", keyboard=mode_keyboard(state))
@@ -135,6 +165,8 @@ class BotApp:
         elif command in ("/stop", "/new"):
             state = await (self.store.stop(user_id) if command == "/stop" else self.store.new_conversation(user_id))
             await self._cancel(user_id)
+            if command == "/new" and state.mode == Mode.CONFESSION:
+                self.temporary.start(user_id, state.epoch)
             await self.sender.text(user_id, "Ответ остановлен." if command == "/stop" else "Началась новая тема.", keyboard=mode_keyboard(state))
         elif command == "/delete_history":
             state = await self.store.get_user(user_id)
@@ -158,6 +190,8 @@ class BotApp:
                 await self.client.answer_callback_query(callback["id"])
                 return
             await self._cancel(user_id)
+            if state.mode == Mode.CONFESSION:
+                self.temporary.start(user_id, state.epoch)
             await self.client.answer_callback_query(callback["id"])
             text = TEMP_NOTICE if state.mode == Mode.CONFESSION else f"Режим: {MODE_LABELS[state.mode]}. Обычная история сохраняется."
             await self.sender.text(user_id, text, keyboard=mode_keyboard(state))
@@ -178,6 +212,9 @@ class BotApp:
             await self.client.answer_callback_query(callback["id"], "Используйте /mode")
 
     def enqueue(self, job: TurnJob) -> None:
+        if job.update_id in self.queued_ids:
+            return
+        self.queued_ids.add(job.update_id)
         queue = self.queues.setdefault(job.user_id, asyncio.Queue())
         queue.put_nowait(job)
         self.arrivals[job.update_id] = time.monotonic()
@@ -186,18 +223,33 @@ class BotApp:
 
     async def _cancel(self, user_id: int) -> None:
         self.temporary.clear(user_id)
+        for key in [key for key in self.web_requests if key[0] == user_id]:
+            self.web_requests.pop(key, None)
+        waiting = self.acquiring.get(user_id)
         active = self.active.get(user_id)
+        if waiting:
+            waiting.cancel()
         if active:
             active.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await active
+        # Drain synchronously before yielding, so the worker cannot extract
+        # another private job while cancellation/SQL cleanup is in progress.
+        cancelled_ids = []
         queue = self.queues.get(user_id)
         if queue:
             while not queue.empty():
                 job = queue.get_nowait()
                 self.arrivals.pop(job.update_id, None)
-                await self.store.finish_job(job.update_id, "cancelled")
+                self.queued_ids.discard(job.update_id)
+                cancelled_ids.append(job.update_id)
                 queue.task_done()
+                del job
+        worker = self.workers.get(user_id)
+        for task in (waiting, active, worker):
+            if task:
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
+        for update_id in cancelled_ids:
+            await self.store.finish_job(update_id, "cancelled")
 
     async def _worker(self, user_id: int) -> None:
         queue = self.queues[user_id]
@@ -205,27 +257,48 @@ class BotApp:
             job = await queue.get()
             acquired = False
             try:
+                acquisition = asyncio.create_task(self.semaphore.acquire())
+                self.acquiring[user_id] = acquisition
                 if job.mode == Mode.CONFESSION:
                     remaining = self.settings.temporary_idle_seconds - (time.monotonic() - self.arrivals.get(job.update_id, time.monotonic()))
+                    if job.channel == "web":
+                        remaining = min(remaining, self.temporary.remaining(job.user_id, job.epoch))
                     if remaining <= 0:
+                        acquisition.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await acquisition
                         await self.store.finish_job(job.update_id, "expired")
                         continue
                     try:
-                        await asyncio.wait_for(self.semaphore.acquire(), timeout=remaining)
+                        await asyncio.wait_for(acquisition, timeout=remaining)
                     except TimeoutError:
                         await self.store.finish_job(job.update_id, "expired")
                         continue
+                    except asyncio.CancelledError:
+                        if self.closed:
+                            raise
+                        await self.store.finish_job(job.update_id, "cancelled")
+                        continue
                 else:
-                    await self.semaphore.acquire()
+                    try:
+                        await acquisition
+                    except asyncio.CancelledError:
+                        if self.closed:
+                            raise
+                        await self.store.finish_job(job.update_id, "cancelled")
+                        continue
                 acquired = True
+                self.acquiring.pop(user_id, None)
                 task = asyncio.create_task(self._process(job))
                 self.active[user_id] = task
                 with suppress(asyncio.CancelledError):
                     await task
             finally:
+                self.acquiring.pop(user_id, None)
                 if acquired:
                     self.semaphore.release()
                 self.arrivals.pop(job.update_id, None)
+                self.queued_ids.discard(job.update_id)
                 self.active.pop(user_id, None)
                 queue.task_done()
         # Do not retain completed per-user queues/tasks indefinitely.
@@ -242,25 +315,61 @@ class BotApp:
         if not await self.store.is_current(job):
             await self.store.finish_job(job.update_id, "cancelled")
             return
-        typing = asyncio.create_task(self._typing(job.chat_id))
+        typing = asyncio.create_task(self._typing(job.chat_id)) if job.channel == "telegram" else None
         try:
+            if job.channel == "web":
+                await self.store.finish_job(job.update_id, "running")
+                record = self.web_requests.get((job.user_id, job.request_id))
+                if record:
+                    record["status"] = "running"
             history = None
             if job.mode == Mode.CONFESSION:
-                history, fresh = self.temporary.context(job.user_id, job.epoch)
-                if fresh:
+                if job.channel == "web":
+                    history = self.temporary.peek(job.user_id, job.epoch)
+                    if history is None:
+                        await self.store.finish_job(job.update_id, "expired")
+                        return
+                    fresh = False
+                else:
+                    history, fresh = self.temporary.context(job.user_id, job.epoch)
+                if fresh and job.channel == "telegram":
                     await self.sender.text(job.chat_id, TEMP_NOTICE)
-            reply = await self.turn.run(job, temporary_history=history)
+            if job.channel == "web" and job.mode == Mode.CONFESSION:
+                try:
+                    reply = await asyncio.wait_for(self.turn.run(job, temporary_history=history), self.temporary.remaining(job.user_id, job.epoch))
+                except TimeoutError:
+                    self.temporary.clear(job.user_id)
+                    self._prune_web_results()
+                    await self.store.finish_job(job.update_id, "expired")
+                    return
+            else:
+                reply = await self.turn.run(job, temporary_history=history)
             if not await self.store.is_current(job):
                 await self.store.finish_job(job.update_id, "cancelled")
                 return
             vector = None
             if job.mode != Mode.CONFESSION:
                 vector = await self.turn.knowledge.embed(job.text)
-            if not await self.store.complete(job, reply.text, vector):
+            metadata = {"text": reply.body if reply.body is not None else reply.text,
+                        "sources": [asdict(source) for source in reply.sources], "referral": reply.referral}
+            if job.channel == "web" and job.mode == Mode.CONFESSION and self.temporary.peek(job.user_id, job.epoch) is None:
+                await self.store.finish_job(job.update_id, "expired")
+                return
+            if not await self.store.complete(job, reply.text, vector, reply_metadata=metadata):
                 return
             if job.mode == Mode.CONFESSION:
-                self.temporary.append(job.user_id, job.epoch, job.text, reply.text)
-            await self._deliver(job, reply.text)
+                self.temporary.append(job.user_id, job.epoch, job.text, reply.text,
+                                      reply_metadata=metadata if job.channel == "web" else None)
+            if job.channel == "web":
+                # No await between the final epoch check and publication in RAM.
+                if not await self.store.is_current(job):
+                    return
+                record = self.web_requests.get((job.user_id, job.request_id))
+                if record:
+                    record.update(status="done", reply=metadata)
+                await self.store.finish_job(job.update_id, "done")
+            else:
+                await self._deliver(job, reply.text)
         except asyncio.CancelledError:
             if not self.closed:
                 await self.store.finish_job(job.update_id, "cancelled")
@@ -272,16 +381,22 @@ class BotApp:
             # Never stringify an exception: provider bodies, SQL parameters and
             # validation errors can contain private text. Codes/classes only.
             logger.warning("turn_error kind=%s", type(exc).__name__)
-            await self.store.finish_job(job.update_id, "failed")
+            from pastoral_bot.turn import TurnError
+            code = exc.code if isinstance(exc, TurnError) else "provider_unavailable"
+            await self.store.finish_job(job.update_id, "error" if job.channel == "web" else "failed", error_code=code)
+            record = self.web_requests.get((job.user_id, job.request_id))
+            if record:
+                record.update(status="error", error_code=code)
             if await self.store.is_current(job):
-                from pastoral_bot.turn import TurnError
                 text = exc.user_message if isinstance(exc, TurnError) else "Сейчас не удалось подготовить проверенный ответ. Попробуйте позже."
-                with suppress(TelegramError):
-                    await self.sender.text(job.chat_id, text)
+                if job.channel == "telegram":
+                    with suppress(TelegramError):
+                        await self.sender.text(job.chat_id, text)
         finally:
-            typing.cancel()
-            with suppress(asyncio.CancelledError):
-                await typing
+            if typing:
+                typing.cancel()
+                with suppress(asyncio.CancelledError):
+                    await typing
 
     async def _deliver(self, job: TurnJob, text: str, start: int = 0) -> None:
         for index, part in enumerate(split_message(text)):
@@ -304,10 +419,12 @@ class BotApp:
         for job in await self.store.pending_jobs():
             self.enqueue(job)
 
-    async def poll(self) -> None:
-        await self.recover()
+    async def poll(self, *, recover: bool = True) -> None:
+        if recover:
+            await self.recover()
         while not self.closed:
             self.temporary.prune()
+            self._prune_web_results()
             await self._prune_waiting()
             try:
                 updates = await self.client.get_updates(await self.store.next_offset(), allowed_updates=["message", "callback_query"])
@@ -330,8 +447,9 @@ class BotApp:
             while not queue.empty():
                 job = queue.get_nowait()
                 queue.task_done()
-                if job.mode == Mode.CONFESSION and now - self.arrivals.get(job.update_id, now) >= self.settings.temporary_idle_seconds:
+                if job.mode == Mode.CONFESSION and (now - self.arrivals.get(job.update_id, now) >= self.settings.temporary_idle_seconds or (job.channel == "web" and self.temporary.peek(job.user_id, job.epoch) is None)):
                     self.arrivals.pop(job.update_id, None)
+                    self.queued_ids.discard(job.update_id)
                     expired.append(job)
                 else:
                     keep.append(job)
@@ -342,10 +460,93 @@ class BotApp:
 
     async def close(self) -> None:
         self.closed = True
-        for task in list(self.active.values()) + list(self.workers.values()):
+        for task in list(self.active.values()) + list(self.workers.values()) + list(self.acquiring.values()):
             task.cancel()
         await asyncio.gather(*list(self.active.values()), *list(self.workers.values()), return_exceptions=True)
         for user_id in list(self.temporary.sessions):
             self.temporary.clear(user_id)
         self.queues.clear()
         self.arrivals.clear()
+        self.queued_ids.clear()
+        self.web_requests.clear()
+        self.acquiring.clear()
+
+    def _prune_web_results(self) -> None:
+        for key, record in list(self.web_requests.items()):
+            if self.temporary.peek(key[0], record["epoch"]) is None:
+                self.web_requests.pop(key, None)
+
+    @staticmethod
+    def web_update_id(user_id: int, request_id: str) -> int:
+        # Telegram update IDs are nonnegative. Include owner to prevent UUID
+        # reuse by one user from colliding with another user's request.
+        value = int.from_bytes(sha256(f"{user_id}:{request_id}".encode()).digest()[:8], "big") & ((1 << 63) - 1)
+        return -(value or 1)
+
+    async def web_state(self, user_id: int) -> dict:
+        state = await self.store.get_user(user_id)
+        self._prune_web_results()
+        context = self.temporary.peek(user_id, state.epoch) if state.mode == Mode.CONFESSION else None
+        if state.mode == Mode.CONFESSION:
+            history = [{"id": item["id"], "role": item["role"],
+                        "text": (item.get("reply_metadata") or {}).get("text", item["content"]),
+                        "sources": (item.get("reply_metadata") or {}).get("sources", [])}
+                       for item in (context or [])]
+        else:
+            history = await self.store.web_history(user_id, state.conversation_id)
+        budget = getattr(self.turn, "budget", None)
+        usage = await budget.usage(user_id) if budget else {"answered": 0, "pending": 0}
+        return {"mode": state.mode.value, "epoch": state.epoch, "conversation_id": state.conversation_id,
+                "history": history, "remaining_answers": max(0, self.settings.daily_answer_limit - usage["answered"] - usage["pending"]),
+                "daily_answer_limit": self.settings.daily_answer_limit, "max_message_chars": self.settings.max_message_chars,
+                "temporary": {"active": state.mode == Mode.CONFESSION and context is not None,
+                              "expired": state.mode == Mode.CONFESSION and context is None,
+                              "idle_seconds": self.settings.temporary_idle_seconds,
+                              "max_seconds": self.settings.temporary_max_seconds,
+                              "remaining_seconds": int(self.temporary.remaining(user_id, state.epoch)) if context is not None else 0}}
+
+    async def web_control(self, user_id: int, expected_epoch: int, action: str, mode: Mode | None = None) -> dict | None:
+        async with self.user_lock(user_id):
+            state = await self.store.web_transition(user_id, expected_epoch, action, mode)
+            if state is None:
+                return None
+            await self._cancel(user_id)
+            if state.mode == Mode.CONFESSION and action in ("mode", "new"):
+                self.temporary.start(user_id, state.epoch)
+            return await self.web_state(user_id)
+
+    async def web_submit(self, user_id: int, request_id: str, text: str, expected_epoch: int) -> tuple[dict, int]:
+        async with self.user_lock(user_id):
+            state = await self.store.get_user(user_id)
+            if state.epoch != expected_epoch:
+                return {"code": "stale_epoch"}, 409
+            old = await self.web_result(user_id, request_id)
+            if old["status"] != "expired":
+                return old, 202
+            update_id = self.web_update_id(user_id, request_id)
+            if await self.store.receipt_status(update_id) is not None:
+                return {"code": "request_expired"}, 409
+            if state.mode == Mode.CONFESSION and self.temporary.peek(user_id, state.epoch) is None:
+                return {"code": "temporary_expired"}, 409
+            self._prune_web_results()
+            if sum(q.qsize() for q in self.queues.values()) + len(self.workers) >= self.settings.max_pending_jobs or (self.queues.get(user_id) and self.queues[user_id].qsize() >= 8) or len(self.web_requests) >= self.settings.max_pending_jobs * 4:
+                return {"code": "queue_full"}, 429
+            job = await self.store.accept_message(update_id, user_id, user_id, text, channel="web", request_id=request_id, expected_epoch=expected_epoch)
+            if job is None:
+                return {"code": "stale_epoch"}, 409
+            if state.mode == Mode.CONFESSION:
+                self.temporary.touch(user_id, state.epoch)
+                self.web_requests[user_id, request_id] = {"epoch": state.epoch, "status": "pending"}
+            self.enqueue(job)
+            return {"request_id": request_id, "status": "pending", "epoch": state.epoch}, 202
+
+    async def web_result(self, user_id: int, request_id: str) -> dict:
+        state = await self.store.get_user(user_id)
+        self._prune_web_results()
+        record = self.web_requests.get((user_id, request_id))
+        if state.mode == Mode.CONFESSION:
+            if record and record["epoch"] == state.epoch:
+                return {"request_id": request_id, **record}
+            return {"request_id": request_id, "status": "expired", "epoch": state.epoch}
+        result = await self.store.web_result(user_id, request_id, state.epoch)
+        return result or {"request_id": request_id, "status": "expired", "epoch": state.epoch}

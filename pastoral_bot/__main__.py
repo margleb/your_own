@@ -22,6 +22,27 @@ from pastoral_bot.storage import Store
 from pastoral_bot.turn import PastoralTurn
 
 
+async def start_web(app: BotApp, settings: BotSettings):
+    """Serve the Mini App in the polling process, with no access logs."""
+    from aiohttp import web
+    from pastoral_bot.web import create_web_app
+
+    directory = Path(__file__).parent / "miniapp" / "dist"
+    if not (directory / "index.html").is_file():
+        raise RuntimeError("miniapp_build_missing")
+    # Parser/socket errors can include raw requests, even with access logs off.
+    http_logger = logging.getLogger("pastoral.http_silent")
+    http_logger.disabled = True
+    runner = web.AppRunner(create_web_app(app, settings, directory), access_log=None, logger=http_logger)
+    try:
+        await runner.setup()
+        await web.TCPSite(runner, settings.web_host, settings.web_port).start()
+    except BaseException:
+        await runner.cleanup()
+        raise
+    return runner
+
+
 async def execute(args) -> None:
     settings = BotSettings()
     if args.command == "doctor":
@@ -102,18 +123,29 @@ async def execute(args) -> None:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 with suppress(NotImplementedError):
                     loop.add_signal_handler(sig, stop.set)
-            poll = asyncio.create_task(app.poll())
-            stopping = asyncio.create_task(stop.wait())
-            logging.getLogger("pastoral.runtime").info("bot_started model=%s", settings.model)
+            runner = None
+            tasks = []
             try:
+                # Restore jobs before accepting new requests from either UI.
+                await app.recover()
+                if settings.web_enabled:
+                    runner = await start_web(app, settings)
+                    if not await client.set_chat_menu_button("Открыть приложение", settings.web_public_url):
+                        raise RuntimeError("miniapp_menu_setup_failed")
+                poll = asyncio.create_task(app.poll(recover=False))
+                stopping = asyncio.create_task(stop.wait())
+                tasks = [poll, stopping]
+                logging.getLogger("pastoral.runtime").info("bot_started model=%s web=%s", settings.model, settings.web_enabled)
                 done, _ = await asyncio.wait([poll, stopping], return_when=asyncio.FIRST_COMPLETED)
                 if poll in done:
                     await poll
             finally:
-                poll.cancel()
-                stopping.cancel()
+                for task in tasks:
+                    task.cancel()
+                if runner is not None:
+                    await runner.cleanup()
                 await app.close()
-                await asyncio.gather(poll, stopping, return_exceptions=True)
+                await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         if ownership is not None:
             with suppress(Exception):

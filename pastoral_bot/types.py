@@ -30,6 +30,8 @@ class TurnJob:
     text: str = field(repr=False)
     message_id: int | None = None
     notice: str = ""
+    channel: str = "telegram"
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,3 +49,5 @@ class TurnReply:
     text: str = field(repr=False)
     source_ids: list[str] = field(default_factory=list)
     referral: str | None = None
+    body: str | None = field(default=None, repr=False)
+    sources: list[SourcePassage] = field(default_factory=list, repr=False)

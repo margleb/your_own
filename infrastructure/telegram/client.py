@@ -103,6 +103,17 @@ class TelegramClient:
         """Who the bot is: id and username. Cached by the listener."""
         return await self._call("getMe", http_timeout=15)
 
+    async def set_chat_menu_button(self, text: str, url: str) -> bool:
+        """Set the bot's default Mini App entry point for private chats."""
+        return bool(await self._call(
+            "setChatMenuButton",
+            {"menu_button": {"type": "web_app", "text": text, "web_app": {"url": url}}},
+            http_timeout=15,
+        ))
+
+    async def get_chat_menu_button(self) -> dict:
+        return await self._call("getChatMenuButton", http_timeout=15)
+
     async def get_updates(self, offset: int | None, timeout: int = 25, *, allowed_updates: list[str] | None = None) -> list[dict]:
         """One long poll. Returns the raw updates, possibly none.
 

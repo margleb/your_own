@@ -31,7 +31,7 @@ def _privacy_request(text: str) -> bool:
     return durable_request or storage_question or no_storage_request or identity_question or forwarding_request
 
 
-def _privacy_reply(mode: Mode, settings) -> TurnReply:
+def _privacy_reply(mode: Mode, settings, channel: str = "telegram") -> TurnReply:
     if mode == Mode.CONFESSION:
         current = "Сейчас выбран временный режим подготовки к исповеди: текст не записывается в базу, индекс или долговечную очередь. "
     else:
@@ -44,24 +44,31 @@ def _privacy_reply(mode: Mode, settings) -> TurnReply:
     lifetime = settings.temporary_max_seconds
     idle_label = "30 минут" if idle == 1800 else f"{idle} секунд"
     lifetime_label = "2 часа" if lifetime == 7200 else f"{lifetime} секунд"
+    transport_privacy = (
+        "Сообщения из Mini App не отправляются в чат Telegram. Удаление нашей истории не удаляет отдельно отправленные сообщения текстовому боту из облачного чата Telegram. "
+        if channel == "web" else
+        "Telegram сохраняет облачную переписку; /delete_history не удаляет сообщения из Telegram. "
+    )
+    if channel == "web":
+        current = current.replace("/delete_history", "удаления истории в настройках").replace("через /mode", "в приложении")
     return TurnReply(
         current +
         f"Временный контекст хранится только в оперативной памяти до {idle_label} бездействия, максимум {lifetime_label}, "
         "и исчезает после перезапуска; режим остаётся временным до вашего явного переключения. "
         "Содержание бесед не записывается в технические журналы ни в одном режиме. "
         "Я не обещаю вечного хранения и не пересылаю заметки священнику. Полное имя и домашний адрес для подготовки не нужны. "
-        "Telegram сохраняет облачную переписку; /delete_history не удаляет сообщения из Telegram. "
+        + transport_privacy +
         "Запросы модели идут через OpenRouter к провайдерам с политикой Zero Data Retention; это не обещание полной анонимности. "
         f"Резервные копии обычной истории зашифрованы и хранятся до {settings.backup_retention_days} дней; удаления повторяются при восстановлении. "
         "Вы можете сами отредактировать и сохранить свою заметку."
     )
 
 
-def service_reply(text: str, mode: Mode, settings) -> TurnReply | None:
+def service_reply(text: str, mode: Mode, settings, *, channel: str = "telegram") -> TurnReply | None:
     """Answer only narrowly recognized service/role questions without a model."""
     normalized = " ".join(text.casefold().replace("ё", "е").split())
     if _privacy_request(normalized):
-        return _privacy_reply(mode, settings)
+        return _privacy_reply(mode, settings, channel)
     if ("разрешительн" in normalized and "молитв" in normalized
             and re.search(r"\b(?:прочит\w*|прочт\w*|произнес\w*|соверш\w*)", normalized)):
         return TurnReply(

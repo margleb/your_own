@@ -60,6 +60,8 @@ services:
     <<: *runtime
     restart: unless-stopped
     command: [run]
+    ports:
+      - "127.0.0.1:8091:8091"
     stop_grace_period: 120s
     depends_on:
       db:

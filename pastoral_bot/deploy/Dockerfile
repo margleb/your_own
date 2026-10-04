@@ -1,4 +1,12 @@
 # syntax=docker/dockerfile:1
+FROM node:22-alpine AS miniapp-build
+ENV NODE_OPTIONS=--max-old-space-size=384
+WORKDIR /build/miniapp
+COPY pastoral_bot/miniapp/package.json pastoral_bot/miniapp/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY pastoral_bot/miniapp ./
+RUN npm run build
+
 FROM postgres:16-bookworm AS pg-client
 
 FROM python:3.12-slim-bookworm
@@ -27,7 +35,9 @@ COPY infrastructure/__init__.py infrastructure/paths.py /app/infrastructure/
 COPY infrastructure/llm/__init__.py infrastructure/llm/client.py infrastructure/llm/call_log.py /app/infrastructure/llm/
 COPY infrastructure/telegram/__init__.py infrastructure/telegram/client.py /app/infrastructure/telegram/
 COPY infrastructure/logging /app/infrastructure/logging/
+COPY --from=miniapp-build /build/miniapp/dist /app/pastoral_bot/miniapp/dist
 RUN mkdir -p /var/lib/pastoral-bot && chown 10001:10001 /var/lib/pastoral-bot
+EXPOSE 8091
 USER 10001:10001
 ENTRYPOINT ["python", "-m", "pastoral_bot"]
 CMD ["run"]

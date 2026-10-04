@@ -134,3 +134,15 @@ async def test_oversized_message_is_rejected_and_fitting_text_is_never_truncated
         telegram_wire["body"] = {"ok": True, "result": {"message_id": 1}}
         await client.send_message(1, text)
         assert telegram_wire["requests"] == [("sendMessage", {"chat_id": 1, "text": text})]
+
+
+@pytest.mark.asyncio
+async def test_default_miniapp_button_is_configured_through_shared_transport(telegram_wire):
+    url = "https://example.org/pastoral/"
+    menu = {"type": "web_app", "text": "Открыть приложение", "web_app": {"url": url}}
+    async with aiohttp.ClientSession() as session:
+        client = TelegramClient(TOKEN, session=session, private=True)
+        assert await client.set_chat_menu_button(menu["text"], url)
+        telegram_wire["body"] = {"ok": True, "result": menu}
+        assert await client.get_chat_menu_button() == menu
+    assert telegram_wire["requests"] == [("setChatMenuButton", {"menu_button": menu}), ("getChatMenuButton", {})]

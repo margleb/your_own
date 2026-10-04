@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,6 +33,11 @@ class BotSettings(BaseSettings):
     campaigns: str = ""
     backup_key: SecretStr = SecretStr("")
     backup_retention_days: int = Field(default=7, ge=1, le=7)
+    web_enabled: bool = False
+    web_host: str = "0.0.0.0"
+    web_port: int = Field(default=8091, ge=1, le=65535)
+    web_public_url: str = "https://bot-ams.margleb.ru/pastoral/"
+    web_auth_max_age_seconds: int = Field(default=7200, ge=60, le=7200)
 
     @field_validator("database_url", "budget_database_url")
     @classmethod
@@ -46,6 +52,10 @@ class BotSettings(BaseSettings):
     def temporary_bounds(self):
         if self.temporary_idle_seconds > self.temporary_max_seconds:
             raise ValueError("Temporary idle lifetime must not exceed maximum lifetime")
+        if self.web_enabled:
+            public = urlsplit(self.web_public_url)
+            if public.scheme != "https" or not public.hostname or public.username or public.password or public.query or public.fragment or not public.path.endswith("/"):
+                raise ValueError("PASTORAL_WEB_PUBLIC_URL must be an HTTPS URL ending in / without credentials, query or fragment")
         return self
 
     @property
